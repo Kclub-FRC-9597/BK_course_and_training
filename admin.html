@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>教务管理 - MakeX Inspire 成绩统计系统</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <script src="shared.js"></script>
+    <script src="shared_indexdb.js"></script>
+    <script src="header.js"></script>
+
+    <div class="container">
+        <!-- ====== 新增班级 ====== -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">🏫 新增班级</span>
+            </div>
+            <div class="form-row">
+                <input type="text" id="groupNameInput" class="input-full" placeholder="输入班级名称" maxlength="20" autocomplete="off" />
+                <button class="btn btn-primary" id="addGroupBtn">➕ 添加班级</button>
+            </div>
+        </div>
+
+        <!-- ====== 新增学员 ====== -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">👤 新增学员</span>
+            </div>
+            <div class="form-row">
+                <input type="text" id="studentNameInput" class="input-full" placeholder="输入学员姓名" maxlength="20" autocomplete="off" />
+                <button class="btn btn-primary" id="addStudentBtn">➕ 添加学员</button>
+            </div>
+        </div>
+
+        <!-- ====== 学员与班级（按班级分组折叠，班级可删除） ====== -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">📋 学员与班级 (<span id="studentCount">0</span>)</span>
+                <div class="view-toggle" id="studentViewToggle">
+                    <button type="button" class="view-btn active" data-view="class">👥 按班级</button>
+                    <button type="button" class="view-btn" data-view="student">📋 按学员</button>
+                </div>
+            </div>
+            <div id="studentList" class="student-list">
+                <!-- Rendered by JS -->
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Modal: 编辑学员 ========== -->
+    <div class="modal-overlay" id="editStudentModal">
+        <div class="modal-box" style="max-width:400px;">
+            <h3 id="editStudentModalTitle">✏️ 编辑学员</h3>
+            <div class="form-group">
+                <label>学员姓名</label>
+                <input type="text" id="editStudentNameInput" class="input-full" maxlength="20" />
+            </div>
+            <div class="form-group">
+                <label>所属班级</label>
+                <select id="editStudentGroupSelect" style="width:100%;padding:0.5rem 0.85rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.9rem;background:#fff;color:var(--gray-800);">
+                    <option value="">不分组</option>
+                </select>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-outline" id="editStudentModalCancel">取消</button>
+                <button class="btn btn-primary" id="editStudentModalConfirm">确认保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Toast Container ========== -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script>
+    if (!window.AdminApp) {
+    // =================================================================
+    //  Admin App — 教务管理 (班级 + 学员，按班级分组折叠)
+    // =================================================================
+    const AdminApp = {
+        _editStudentId: null,
+
+        init() {
+            Shared.loadData();
+            this.bindEvents();
+            this.render();
+        },
+
+        generateId() { return Shared.generateId(); },
+        toast(msg, type) { Shared.toast(msg, type); },
+        escapeHtml(str) { return Shared.escapeHtml(str); },
+
+        // ============ Group Operations ============
+        addGroup(name) {
+            name = name.trim();
+            if (!name) { this.toast('请输入班级名称', 'warning'); return false; }
+            if (Shared.data.classes.some((c) => c.name === name)) { this.toast(`班级"${name}"已存在`, 'warning'); return false; }
+            const id = this.generateId();
+            Shared.data.classes.push({ id, name });
+            Shared.saveData();
+            this.render();
+            this.toast(`已添加班级"${name}"`);
+            return true;
+        },
+
+        removeGroup(id) {
+            const cls = Shared.data.classes.find((c) => c.id === id);
+            if (!cls) return;
+            if (!confirm(`确定要删除班级"${cls.name}"吗？\n（该班级下的学员将变为不分组）`)) return;
+            Shared.data.classes = Shared.data.classes.filter((c) => c.id !== id);
+            // 关闭该班级所有 active enrollment
+            Shared.data.enrollments.forEach(e => {
+                if (e.classId === id && e.status === 'active') {
+                    e.leftAt = new Date().toISOString().slice(0, 10);
+                    e.status = 'inactive';
+                }
+            });
+            Shared.saveData();
+            this.render();
+            this.toast(`已删除班级"${cls.name}"`);
+        },
+
+        // ============ Student Operations ============
+        addStudent(name) {
+            name = name.trim();
+            if (!name) { this.toast('请输入学员姓名', 'warning'); return false; }
+            if (Shared.data.students.some((s) => s.name === name)) { this.toast(`学员"${name}"已存在`, 'warning'); return false; }
+            Shared.data.students.push({ id: this.generateId(), name });
+            Shared.saveData();
+            this.render();
+            this.toast(`已添加学员"${name}"`);
+            return true;
+        },
+
+        openEditStudentModal(id) {
+            const student = Shared.data.students.find((s) => s.id === id);
+            if (!student) return;
+            this._editStudentId = id;
+            document.getElementById('editStudentNameInput').value = student.name;
+            // 班级选择：显示所有班级，用 enrollment 判断是否选中
+            const select = document.getElementById('editStudentGroupSelect');
+            const currentEnroll = Shared.getCurrentEnrollment(id);
+            select.innerHTML = '<option value="">不分组</option>' + Shared.data.classes.map((c) =>
+                `<option value="${c.id}" ${currentEnroll && currentEnroll.classId === c.id ? 'selected' : ''}>${this.escapeHtml(c.name)}</option>`
+            ).join('');
+            document.getElementById('editStudentModalTitle').textContent = `✏️ 编辑学员 - ${this.escapeHtml(student.name)}`;
+            document.getElementById('editStudentModal').classList.add('open');
+            setTimeout(() => document.getElementById('editStudentNameInput').focus(), 100);
+        },
+
+        closeEditStudentModal() {
+            document.getElementById('editStudentModal').classList.remove('open');
+            this._editStudentId = null;
+        },
+
+        confirmEditStudent() {
+            const id = this._editStudentId;
+            if (!id) return;
+            const student = Shared.data.students.find((s) => s.id === id);
+            if (!student) return;
+            const newName = document.getElementById('editStudentNameInput').value.trim();
+            if (!newName) { this.toast('姓名不能为空', 'warning'); return; }
+            if (newName !== student.name && Shared.data.students.some((s) => s.name === newName)) {
+                this.toast(`学员"${newName}"已存在`, 'warning');
+                return;
+            }
+            student.name = newName;
+            // 班级变更：通过 enrollment 处理
+            const newClassId = document.getElementById('editStudentGroupSelect').value;
+            const currentEnroll = Shared.getCurrentEnrollment(id);
+            if (newClassId) {
+                if (!currentEnroll || currentEnroll.classId !== newClassId) {
+                    Shared.createEnrollment(id, newClassId);
+                }
+            } else {
+                // 选了不分组 → 关闭当前 enrollment
+                if (currentEnroll) {
+                    Shared.closeEnrollment(currentEnroll.id, 'inactive');
+                }
+            }
+            Shared.saveData();
+            this.closeEditStudentModal();
+            this.render();
+            this.toast(`已更新学员"${student.name}"`);
+        },
+
+        editStudent(id) { this.openEditStudentModal(id); },
+
+        removeStudent(id) {
+            const student = Shared.data.students.find((s) => s.id === id);
+            if (!student) return;
+            if (!confirm(`确定要移除学员"${student.name}"吗？\n（该学员在集训中的成绩记录将被保留）`)) return;
+            // 关闭所有 active enrollment
+            Shared.data.enrollments.forEach(e => {
+                if (e.studentId === id && e.status === 'active') {
+                    e.leftAt = new Date().toISOString().slice(0, 10);
+                    e.status = 'inactive';
+                }
+            });
+            Shared.data.students = Shared.data.students.filter((s) => s.id !== id);
+            Shared.data.trainings.forEach((t) => {
+                t.studentIds = t.studentIds.filter((sid) => sid !== id);
+                t.mockCompetitions.forEach((m) => { delete m.scores[id]; });
+            });
+            Shared.saveData();
+            this.render();
+            this.toast(`已移除学员"${student.name}"`);
+        },
+
+        // ============ Events Binding ============
+        bindEvents() {
+            document.getElementById('addGroupBtn').addEventListener('click', () => {
+                const input = document.getElementById('groupNameInput');
+                this.addGroup(input.value);
+                input.value = '';
+                input.focus();
+            });
+            document.getElementById('groupNameInput').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') document.getElementById('addGroupBtn').click();
+            });
+            document.getElementById('addStudentBtn').addEventListener('click', () => {
+                const nameInput = document.getElementById('studentNameInput');
+                this.addStudent(nameInput.value);
+                nameInput.value = '';
+                nameInput.focus();
+            });
+            document.getElementById('studentNameInput').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') document.getElementById('addStudentBtn').click();
+            });
+            // === 学员/班级操作 ===
+            document.getElementById('editStudentModalCancel').addEventListener('click', () => this.closeEditStudentModal());
+            document.getElementById('editStudentModalConfirm').addEventListener('click', () => this.confirmEditStudent());
+            document.getElementById('editStudentNameInput').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') this.confirmEditStudent();
+            });
+            document.getElementById('editStudentModal').addEventListener('click', (e) => {
+                if (e.target === e.currentTarget) this.closeEditStudentModal();
+            });
+
+            // === 学员视图切换（按班级 / 按学员） ===
+            document.querySelectorAll('#studentViewToggle .view-btn').forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    this.setStudentsView(btn.dataset.view);
+                    this.render();
+                });
+            });
+        },
+
+        // ============ Render ============
+        render() {
+            try { this.renderStudents(); } catch (e) { console.warn('renderStudents error:', e); }
+        },
+
+        renderStudents() {
+            const container = document.getElementById('studentList');
+            document.getElementById('studentCount').textContent = Shared.data.students.length;
+            if (Shared.data.students.length === 0) {
+                container.innerHTML = '<div class="empty-state"><div class="icon">👤</div><p>暂无学员，请在上方添加</p></div>';
+                return;
+            }
+
+            // 同步视图切换按钮高亮
+            document.querySelectorAll('#studentViewToggle .view-btn').forEach((b) => {
+                b.classList.toggle('active', b.dataset.view === this.getStudentsView());
+            });
+
+            if (this.getStudentsView() === 'student') {
+                this.renderStudentsFlat(container);
+            } else {
+                this.renderStudentsByClass(container);
+            }
+            this.bindStudentActions(container);
+        },
+
+        // ---- 学员视图模式：'class' 按班级分组（默认） | 'student' 按学员平铺 ----
+        getStudentsView() {
+            return localStorage.getItem('admin_students_view') === 'student' ? 'student' : 'class';
+        },
+        setStudentsView(view) {
+            localStorage.setItem('admin_students_view', view);
+        },
+        bindStudentActions(container) {
+            // 操作按钮（两种视图共用）
+            container.querySelectorAll('.del').forEach((el) => {
+                el.addEventListener('click', () => this.removeStudent(el.dataset.studentId));
+            });
+            container.querySelectorAll('.edit-student').forEach((el) => {
+                el.addEventListener('click', () => this.editStudent(el.dataset.studentId));
+            });
+            container.querySelectorAll('.edit-student-group').forEach((el) => {
+                el.addEventListener('click', () => this.editStudent(el.dataset.studentId));
+            });
+        },
+
+        // ============ 视图：按学员平铺（学员 | 所属班级） ============
+        renderStudentsFlat(container) {
+            const students = [...Shared.data.students].sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+            let html = '<div style="overflow-x:auto;"><table class="score-table">'
+                + '<thead><tr>'
+                + '<th style="width:40px;text-align:center;">#</th>'
+                + '<th style="text-align:left;">学员</th>'
+                + '<th style="text-align:left;">所属班级</th>'
+                + '<th style="width:80px;text-align:center;">操作</th>'
+                + '</tr></thead><tbody>';
+            students.forEach((s, i) => {
+                const gn = Shared.getCurrentClassName(s.id);
+                const groupDisplay = gn
+                    ? `<span class="edit-student-group" data-student-id="${s.id}" title="点击修改班级" style="cursor:pointer;color:var(--gray-600);border-bottom:1px dashed var(--gray-300);">🏫 ${this.escapeHtml(gn)}</span>`
+                    : `<span class="edit-student-group" data-student-id="${s.id}" title="点击设置班级" style="cursor:pointer;color:var(--gray-400);border-bottom:1px dashed var(--gray-300);">📂 待分班</span>`;
+                html += `<tr>
+                    <td style="text-align:center;color:var(--gray-400);">${i + 1}</td>
+                    <td><strong>${this.escapeHtml(s.name)}</strong></td>
+                    <td>${groupDisplay}</td>
+                    <td style="text-align:center;white-space:nowrap;">
+                        <button class="edit-student" data-student-id="${s.id}" title="编辑" style="background:none;border:none;cursor:pointer;color:var(--primary);font-size:0.8rem;padding:0.15rem 0.4rem;">✏️</button>
+                        <button class="del" data-student-id="${s.id}" title="移除" style="background:none;border:none;cursor:pointer;color:var(--danger);font-size:0.8rem;padding:0.15rem 0.4rem;">🗑️</button>
+                    </td>
+                </tr>`;
+            });
+            html += '</tbody></table></div>';
+            container.innerHTML = html;
+        },
+
+        // ============ 视图：按班级分组（可折叠） ============
+        renderStudentsByClass(container) {
+            // ---- 按当前班级分组（未分班学员归入“待分班”） ----
+            const byClass = new Map(); // classId -> students[]
+            const unassigned = [];
+            Shared.data.students.forEach((s) => {
+                const classId = Shared.getCurrentClassId(s.id);
+                if (classId && Shared.getGroupName(classId)) {
+                    if (!byClass.has(classId)) byClass.set(classId, []);
+                    byClass.get(classId).push(s);
+                } else {
+                    unassigned.push(s);
+                }
+            });
+
+            // 展示所有班级（含空班，便于在此管理/删除班级）；末尾追加虚拟“待分班”分组（非空才显示）
+            const collapsedSet = this.getCollapsedStudentGroups();
+            const groups = Shared.data.classes.map((c) => ({
+                key: c.id,
+                name: c.name,
+                students: (byClass.get(c.id) || []).sort((a, b) => a.name.localeCompare(b.name, 'zh')),
+                virtual: false,
+            }));
+            groups.push({
+                key: '__unassigned__',
+                name: '待分班',
+                students: [...unassigned].sort((a, b) => a.name.localeCompare(b.name, 'zh')),
+                virtual: true,
+            });
+            const last = groups[groups.length - 1];
+            if (last.virtual && last.students.length === 0) groups.pop();
+
+            let html = '';
+            groups.forEach((g) => {
+                const collapsed = collapsedSet.has(g.key);
+                const arrow = collapsed ? '▶' : '▼';
+                const badge = g.virtual
+                    ? '<span class="student-group-badge unassigned">未分班</span>'
+                    : '';
+                const delBtn = g.virtual
+                    ? ''
+                    : `<button class="del-group" data-group-id="${g.key}" title="删除班级" style="background:none;border:none;cursor:pointer;color:var(--gray-400);font-size:0.85rem;padding:0 0.3rem;line-height:1;">✕</button>`;
+                const bodyContent = g.students.length === 0
+                    ? '<div class="student-group-empty">暂无学员</div>'
+                    : `<table class="score-table">
+                            <thead><tr>
+                                <th style="width:40px;text-align:center;">#</th>
+                                <th style="text-align:left;">姓名</th>
+                                <th style="width:80px;text-align:center;">操作</th>
+                            </tr></thead>
+                            <tbody>
+                            ${g.students.map((s, i) => `
+                                <tr>
+                                    <td style="text-align:center;color:var(--gray-400);">${i + 1}</td>
+                                    <td><strong>${this.escapeHtml(s.name)}</strong></td>
+                                    <td style="text-align:center;white-space:nowrap;">
+                                        <button class="edit-student" data-student-id="${s.id}" title="编辑" style="background:none;border:none;cursor:pointer;color:var(--primary);font-size:0.8rem;padding:0.15rem 0.4rem;">✏️</button>
+                                        <button class="del" data-student-id="${s.id}" title="移除" style="background:none;border:none;cursor:pointer;color:var(--danger);font-size:0.8rem;padding:0.15rem 0.4rem;">🗑️</button>
+                                    </td>
+                                </tr>`).join('')}
+                            </tbody>
+                        </table>`;
+                html += `
+                <div class="student-group${collapsed ? ' collapsed' : ''}" data-group-key="${g.key}">
+                    <div class="student-group-header" title="点击折叠/展开">
+                        <span class="student-group-arrow">${arrow}</span>
+                        <span class="student-group-name">${g.virtual ? '📂' : '🏫'} ${this.escapeHtml(g.name)}</span>
+                        ${badge}
+                        <span class="student-group-count">${g.students.length} 人</span>
+                        ${delBtn}
+                    </div>
+                    <div class="student-group-body${collapsed ? ' collapsed' : ''}">
+                        ${bodyContent}
+                    </div>
+                </div>`;
+            });
+            container.innerHTML = html;
+
+            // 班级头点击折叠/展开（删除按钮不触发）
+            container.querySelectorAll('.student-group-header').forEach((h) => {
+                h.addEventListener('click', (e) => {
+                    if (e.target.closest('.del-group')) return;
+                    this.toggleStudentGroup(h.closest('.student-group'));
+                });
+            });
+            // 删除班级
+            container.querySelectorAll('.del-group').forEach((el) => {
+                el.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.removeGroup(el.dataset.groupId);
+                });
+            });
+        },
+
+        // ---- 学员分组折叠状态（localStorage 持久化） ----
+        getCollapsedStudentGroups() {
+            try {
+                const raw = localStorage.getItem('admin_student_groups_collapsed');
+                return new Set(raw ? JSON.parse(raw) : []);
+            } catch (e) { return new Set(); }
+        },
+        saveCollapsedStudentGroups(set) {
+            localStorage.setItem('admin_student_groups_collapsed', JSON.stringify([...set]));
+        },
+        toggleStudentGroup(groupEl) {
+            const key = groupEl.dataset.groupKey;
+            const body = groupEl.querySelector('.student-group-body');
+            const arrow = groupEl.querySelector('.student-group-arrow');
+            const collapsed = groupEl.classList.toggle('collapsed');
+            if (body) body.classList.toggle('collapsed', collapsed);
+            if (arrow) arrow.textContent = collapsed ? '▶' : '▼';
+            const set = this.getCollapsedStudentGroups();
+            if (collapsed) set.add(key); else set.delete(key);
+            this.saveCollapsedStudentGroups(set);
+        },
+    };
+
+    window.AdminApp = AdminApp;
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => window.AdminApp.init());
+    } else {
+        window.AdminApp.init();
+    }
+    </script>
+</body>
+</html>

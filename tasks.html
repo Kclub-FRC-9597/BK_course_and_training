@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>任务管理 - MakeX Inspire 成绩统计系统</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <script src="shared.js"></script>
+    <script src="shared_indexdb.js"></script>
+    <script src="header.js"></script>
+
+    <div class="container">
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">🏅 新增任务</span>
+            </div>
+            <div class="form-row">
+                <input type="text" id="taskNameInput" class="input-full" placeholder="输入任务名称" maxlength="20" autocomplete="off" />
+                <select id="taskTypeSelect">
+                    <option value="basic">基本功</option>
+                    <option value="challenge">挑战类</option>
+                </select>
+                <input type="number" id="taskMaxScoreInput" placeholder="满分" min="0" max="999" step="1"
+                    style="width:80px;padding:0.5rem 0.6rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.9rem;text-align:center;appearance:textfield;-moz-appearance:textfield;" />
+                <input type="text" id="taskGoalTimesInput" placeholder="目标档位(秒,逗号分隔,可选)"
+                    style="width:190px;padding:0.5rem 0.6rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.9rem;" />
+                <button class="btn btn-primary" id="addTaskBtn">➕ 添加</button>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">📋 全部任务 (<span id="taskCount">0</span>)</span>
+            </div>
+            <div id="taskList">
+                <!-- Rendered by JS -->
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Modal: 编辑任务 ========== -->
+    <div class="modal-overlay" id="editTaskModal">
+        <div class="modal-box">
+            <h3>✏️ 编辑任务</h3>
+            <div class="form-group">
+                <label>任务名称</label>
+                <input type="text" id="editTaskNameInput" class="input-full" placeholder="任务名称" maxlength="20" />
+            </div>
+            <div class="form-group">
+                <label>任务类别</label>
+                <select id="editTaskTypeSelect" style="width:100%;padding:0.5rem 0.85rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.9rem;background:#fff;color:var(--gray-800);">
+                    <option value="basic">基本功</option>
+                    <option value="challenge">挑战类</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>满分</label>
+                <input type="number" id="editTaskMaxScoreInput" placeholder="留空则不限制" min="0" max="999" step="1"
+                    style="width:100%;padding:0.5rem 0.85rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.9rem;appearance:textfield;-moz-appearance:textfield;" />
+            </div>
+            <div class="form-group">
+                <label>目标档位（秒，逗号分隔，可留空）</label>
+                <input type="text" id="editTaskGoalTimesInput" placeholder="如 100,80,70（满分前提用时目标）" style="width:100%;padding:0.5rem 0.85rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.9rem;" />
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-outline" id="editTaskCancel">取消</button>
+                <button class="btn btn-primary" id="editTaskConfirm">确认修改</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script>
+    if (!window.TasksApp) {
+    // =================================================================
+    //  Tasks App — 任务管理
+    // =================================================================
+    const TasksApp = {
+        _editingTaskId: null,
+
+        init() {
+            Shared.loadData();
+            this.bindEvents();
+            this.render();
+        },
+
+        generateId() { return Shared.generateId(); },
+        toast(msg, type) { Shared.toast(msg, type); },
+        escapeHtml(str) { return Shared.escapeHtml(str); },
+
+        addTask(name, type) {
+            name = name.trim();
+            if (!name) { this.toast('请输入任务名称', 'warning'); return; }
+            if (Shared.data.tasks.some((t) => t.name === name)) { this.toast(`任务"${name}"已存在`, 'warning'); return; }
+            const maxScoreInput = document.getElementById('taskMaxScoreInput');
+            const maxScore = maxScoreInput ? parseInt(maxScoreInput.value) : null;
+            const gtInput = document.getElementById('taskGoalTimesInput');
+            const goalTimes = gtInput ? this.parseGoalTimes(gtInput.value) : null;
+            Shared.data.tasks.push({
+                id: this.generateId(),
+                name,
+                type: type || 'basic',
+                maxScore: (!isNaN(maxScore) && maxScore > 0) ? maxScore : null,
+                ...(goalTimes ? { goalTimes } : {}),
+            });
+            Shared.saveData();
+            this.render();
+            const typeLabel = type === 'challenge' ? '挑战类' : '基本功';
+            this.toast(`已添加${typeLabel}任务"${name}"`);
+        },
+
+        // 解析逗号分隔的目标档位（秒）→ 数字数组；无效返回 null
+        parseGoalTimes(str) {
+            if (!str) return null;
+            const nums = String(str).split(/[,，\s]+/).map((s) => parseFloat(s)).filter((n) => !isNaN(n) && n > 0);
+            return nums.length ? nums : null;
+        },
+
+        removeTask(id) {
+            const task = Shared.data.tasks.find((t) => t.id === id);
+            if (!task) return;
+            const inUse = Shared.data.trainings.some((tr) =>
+                tr.mockCompetitions.some((m) =>
+                    (m.tasks || []).some((x) => x.taskId === id) ||
+                    (m.taskIds || []).includes(id) || m.taskId === id
+                )
+            );
+            if (inUse) {
+                this.toast(`任务"${task.name}"已被模拟赛引用，无法删除`, 'error');
+                return;
+            }
+            if (!confirm(`确定要删除任务"${task.name}"吗？`)) return;
+            Shared.data.tasks = Shared.data.tasks.filter((t) => t.id !== id);
+            Shared.saveData();
+            this.render();
+            this.toast(`已删除任务"${task.name}"`);
+        },
+
+        openEditModal(id) {
+            const task = Shared.data.tasks.find((t) => t.id === id);
+            if (!task) return;
+            this._editingTaskId = id;
+            document.getElementById('editTaskNameInput').value = task.name;
+            document.getElementById('editTaskTypeSelect').value = task.type || 'basic';
+            const msInput = document.getElementById('editTaskMaxScoreInput');
+            if (msInput) msInput.value = task.maxScore || '';
+            const gtInput = document.getElementById('editTaskGoalTimesInput');
+            if (gtInput) gtInput.value = (task.goalTimes || []).join(',');
+            document.getElementById('editTaskModal').classList.add('open');
+            setTimeout(() => document.getElementById('editTaskNameInput').focus(), 100);
+        },
+
+        closeEditModal() {
+            document.getElementById('editTaskModal').classList.remove('open');
+            this._editingTaskId = null;
+        },
+
+        confirmEditModal() {
+            const id = this._editingTaskId;
+            if (!id) return;
+            const task = Shared.data.tasks.find((t) => t.id === id);
+            if (!task) return;
+            const name = document.getElementById('editTaskNameInput').value.trim();
+            if (!name) { this.toast('请输入任务名称', 'warning'); return; }
+            const type = document.getElementById('editTaskTypeSelect').value;
+            if (Shared.data.tasks.some((t) => t.name === name && t.id !== id)) {
+                this.toast(`任务"${name}"已存在`, 'warning');
+                return;
+            }
+            task.name = name;
+            task.type = type;
+            const msInput = document.getElementById('editTaskMaxScoreInput');
+            const maxScore = msInput ? parseInt(msInput.value) : null;
+            task.maxScore = (!isNaN(maxScore) && maxScore > 0) ? maxScore : null;
+            const gtInput = document.getElementById('editTaskGoalTimesInput');
+            const goalTimes = gtInput ? this.parseGoalTimes(gtInput.value) : null;
+            if (goalTimes) task.goalTimes = goalTimes; else delete task.goalTimes;
+            Shared.saveData();
+            this.render();
+            this.closeEditModal();
+            this.toast(`已更新任务"${name}"`);
+        },
+
+        bindEvents() {
+            document.getElementById('addTaskBtn').addEventListener('click', () => {
+                const input = document.getElementById('taskNameInput');
+                const typeSelect = document.getElementById('taskTypeSelect');
+                this.addTask(input.value, typeSelect.value);
+                input.value = '';
+                const msInput = document.getElementById('taskMaxScoreInput');
+                if (msInput) msInput.value = '';
+                const gtInput = document.getElementById('taskGoalTimesInput');
+                if (gtInput) gtInput.value = '';
+                input.focus();
+            });
+            document.getElementById('taskNameInput').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') document.getElementById('addTaskBtn').click();
+            });
+            document.getElementById('taskMaxScoreInput').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') document.getElementById('addTaskBtn').click();
+            });
+            document.getElementById('editTaskCancel').addEventListener('click', () => this.closeEditModal());
+            document.getElementById('editTaskConfirm').addEventListener('click', () => this.confirmEditModal());
+            document.getElementById('editTaskModal').addEventListener('click', (e) => {
+                if (e.target === e.currentTarget) this.closeEditModal();
+            });
+            document.getElementById('editTaskNameInput').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') this.confirmEditModal();
+            });
+        },
+
+        render() {
+            const container = document.getElementById('taskList');
+            document.getElementById('taskCount').textContent = Shared.data.tasks.length;
+
+            if (Shared.data.tasks.length === 0) {
+                container.innerHTML = '<div class="empty-state"><div class="icon">🏅</div><p>暂无任务，请在上方添加</p></div>';
+                return;
+            }
+
+            const basic = Shared.data.tasks.filter((t) => (t.type || 'basic') === 'basic');
+            const challenge = Shared.data.tasks.filter((t) => t.type === 'challenge');
+
+            let html = '';
+
+            const renderGroup = (tasks, label, icon, typeClass) => {
+                if (tasks.length === 0) return '';
+                return `<div class="task-group">
+                    <div class="task-group-header">
+                        ${icon} ${label}
+                        <span class="task-group-count">${tasks.length}个</span>
+                    </div>
+                    ${tasks.map((t) => {
+                        const inUse = Shared.data.trainings.some((tr) =>
+                            tr.mockCompetitions.some((m) =>
+                                (m.tasks || []).some((x) => x.taskId === t.id) ||
+                                (m.taskIds || []).includes(t.id) || m.taskId === t.id
+                            )
+                        );
+                        const delBtn = inUse
+                            ? '<span class="task-locked">🔒</span>'
+                            : `<button class="btn btn-danger btn-xs del-task-btn" data-task-id="${t.id}">✕</button>`;
+                        const maxScoreLabel = t.maxScore ? `<span style="font-size:0.7rem;color:var(--gray-400);margin-left:0.3rem;">满分${t.maxScore}</span>` : '';
+                        const goalLabel = (t.goalTimes && t.goalTimes.length) ? `<span style="font-size:0.7rem;color:var(--gray-400);margin-left:0.3rem;">目标 ${t.goalTimes.join('/')}s</span>` : '';
+                        return `<div class="task-item">
+                            <div class="task-name">
+                                <span class="type-badge ${typeClass}">${label}</span>
+                                ${this.escapeHtml(t.name)}${maxScoreLabel}${goalLabel}
+                            </div>
+                            <div style="display:flex;gap:0.3rem;align-items:center;">
+                                <button class="btn btn-outline btn-xs edit-task-btn" data-task-id="${t.id}">✏️</button>
+                                ${delBtn}
+                            </div>
+                        </div>`;
+                    }).join('')}
+                </div>`;
+            };
+
+            html += renderGroup(basic, '基本功', '💪', 'type-basic');
+            html += renderGroup(challenge, '挑战类', '🔥', 'type-challenge');
+
+            container.innerHTML = html;
+
+            container.querySelectorAll('.del-task-btn').forEach((btn) => {
+                btn.addEventListener('click', () => this.removeTask(btn.dataset.taskId));
+            });
+            container.querySelectorAll('.edit-task-btn').forEach((btn) => {
+                btn.addEventListener('click', () => this.openEditModal(btn.dataset.taskId));
+            });
+        },
+    };
+
+    window.TasksApp = TasksApp;
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => window.TasksApp.init());
+    } else {
+        window.TasksApp.init();
+    }
+    </script>
+</body>
+</html>

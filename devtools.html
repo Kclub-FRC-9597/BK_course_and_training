@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>开发者工具 - MakeX Inspire 成绩统计系统</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <script src="shared.js"></script>
+    <script src="shared_indexdb.js"></script>
+    <script src="header.js"></script>
+
+    <div class="container">
+        <!-- ====== 存储引擎 ====== -->
+        <div class="card" style="margin-bottom:1rem;">
+            <div class="card-header" style="margin-bottom:0;">
+                <span class="card-title">💾 存储引擎</span>
+                <span id="engineStatus" style="font-size:0.82rem;font-weight:400;color:var(--gray-500);">🔍 检测中...</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:1.25rem;flex-wrap:wrap;padding-top:0.25rem;">
+                <label style="display:inline-flex;align-items:center;gap:0.3rem;cursor:pointer;font-size:0.88rem;">
+                    <input type="radio" name="storageEngine" value="ls" checked style="accent-color:var(--primary);">
+                    📦 localStorage
+                </label>
+                <label style="display:inline-flex;align-items:center;gap:0.3rem;cursor:pointer;font-size:0.88rem;">
+                    <input type="radio" name="storageEngine" value="idb" disabled style="accent-color:var(--primary);">
+                    🗄️ IndexedDB (STS_DB)
+                </label>
+                <button class="btn btn-outline btn-sm" id="verifyIDBBtn">🔬 验证并写入 STS_DB</button>
+                <button class="btn btn-outline btn-sm" id="switchToLSBtn" style="display:none;">🔙 切回 localStorage</button>
+            </div>
+            <div id="idbVerifyLog" style="margin-top:0.5rem;font-size:0.82rem;background:#f8fafc;padding:0.5rem 0.75rem;border-radius:6px;font-family:monospace;white-space:pre-wrap;display:none;line-height:1.6;"></div>
+        </div>
+
+        <!-- ====== STS_DB 数据库管理 (DB Manager) ====== -->
+        <div class="card" style="margin-bottom:1rem;">
+            <div class="card-header" style="margin-bottom:0;">
+                <span class="card-title">🗄️ STS_DB 数据库管理</span>
+                <span style="font-size:0.82rem;font-weight:400;color:var(--gray-500);">IndexedDB 表结构检查 / 维护</span>
+            </div>
+
+            <div id="dbInfo" style="font-size:0.88rem;color:var(--gray-600);">🔍 检测中...</div>
+
+            <div style="margin-top:0.75rem;">
+                <div style="font-size:0.85rem;font-weight:600;color:var(--gray-700);margin-bottom:0.3rem;">✅ Schema 校验</div>
+                <div id="schemaCheck" style="font-size:0.82rem;">🔍 检测中...</div>
+            </div>
+
+            <div style="margin-top:0.75rem;">
+                <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.3rem;">
+                    <span style="font-size:0.85rem;font-weight:600;color:var(--gray-700);">📋 表结构</span>
+                    <button class="btn btn-outline btn-sm" id="refreshBtn">🔄 刷新</button>
+                </div>
+                <div style="overflow-x:auto;">
+                    <table class="score-table" id="tableList"><tbody><tr><td>🔍 检测中...</td></tr></tbody></table>
+                </div>
+            </div>
+
+            <div style="margin-top:0.75rem;">
+                <div style="font-size:0.85rem;font-weight:600;color:var(--gray-700);margin-bottom:0.3rem;">🛠 表管理 (与 _initIDB 一致)</div>
+                <div id="schemaPanel" style="overflow-x:auto;">🔍 检测中...</div>
+            </div>
+
+            <div id="dataCard" style="margin-top:0.75rem;display:none;">
+                <div class="form-row" style="margin-bottom:0.5rem;">
+                    <select id="tableSelect" style="padding:0.4rem 0.7rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.85rem;background:#fff;color:var(--gray-800);">
+                        <option value="">选择表...</option>
+                    </select>
+                    <button class="btn btn-outline btn-sm" id="viewDataBtn">查看</button>
+                    <button class="btn btn-outline btn-sm" id="deleteTableBtn" style="color:var(--danger);">🗑 删除此表</button>
+                </div>
+                <div id="dataView" style="overflow-x:auto;"></div>
+            </div>
+
+            <div id="actionCard" style="margin-top:0.75rem;">
+                <div class="form-row">
+                    <button class="btn btn-outline btn-sm" id="deleteGroupsBtn" style="display:none;color:var(--danger);">🗑 删除旧 groups 表</button>
+                    <span style="font-size:0.78rem;color:var(--gray-400);">(旧数据已迁移至 classes + enrollments)</span>
+                </div>
+                <div class="mig-log" id="actionLog" style="display:none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Toast Container ========== -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script src="devtools.js"></script>
+</body>
+</html>

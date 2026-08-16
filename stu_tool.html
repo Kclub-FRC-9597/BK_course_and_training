@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>成绩录入 - MakeX Inspire</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <!-- ===== 首次设定身份 ===== -->
+    <div class="container" id="setupView" style="max-width:480px;margin:3rem auto;">
+        <div class="card" style="text-align:center;">
+            <div style="font-size:2.5rem;margin-bottom:0.5rem;">👤</div>
+            <h2 style="margin:0 0 0.25rem;color:var(--gray-800);">欢迎使用成绩录入</h2>
+            <p style="color:var(--gray-500);font-size:0.9rem;margin:0 0 1.25rem;">首次使用请先设定你的姓名</p>
+            <div class="form-group">
+                <input type="text" id="setupNameInput" aria-label="输入姓名" placeholder="输入你的姓名" maxlength="20" style="width:100%;padding:0.6rem 0.85rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:1rem;text-align:center;" />
+            </div>
+            <button class="btn btn-primary" id="setupConfirmBtn" style="width:100%;justify-content:center;">开始录入 →</button>
+        </div>
+    </div>
+
+    <!-- ===== 成绩录入界面 ===== -->
+    <div class="container" id="entryView" style="display:none;">
+        <!-- 顶部：欢迎 + 身份信息 -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">🏆 MakeX Inspire 成绩录入</span>
+                <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                    <span class="student-tag" id="currentNameTag" style="background:var(--primary-bg);color:var(--primary);">👤 -</span>
+                    <button class="btn btn-sm btn-outline" id="switchIdentityBtn" title="重新设定自己的姓名">切换</button>
+                    <a href="index.html" class="btn btn-sm btn-outline" title="返回 Inspire 主页">🏠 返回主页</a>
+                </div>
+            </div>
+            <p style="font-size:0.82rem;color:var(--gray-400);margin:0;">各设备独立保存，录入后可导出交给老师汇总。</p>
+        </div>
+
+        <!-- 最上方：录入表单（页面重点，高亮） -->
+        <div class="card card-entry">
+            <div class="card-header">
+                <span class="card-title">📝 录入成绩</span>
+            </div>
+            <div class="form-row">
+                <select id="entryTypeSelect" aria-label="任务类型" style="min-width:120px;">
+                    <option value="basic">基础</option>
+                    <option value="random">随机</option>
+                </select>
+                <input type="number" id="entryScoreInput" aria-label="得分" placeholder="得分" min="0" step="1" style="width:90px;padding:0.5rem 0.6rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.9rem;text-align:center;appearance:textfield;-moz-appearance:textfield;" />
+                <input type="number" id="entryTimeInput" aria-label="用时" placeholder="用时(秒)" min="0" step="0.001" style="width:110px;padding:0.5rem 0.6rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.9rem;text-align:center;appearance:textfield;-moz-appearance:textfield;" />
+                <button class="btn btn-primary" id="entrySubmitBtn">📝 提交</button>
+            </div>
+            <div class="form-note" style="font-size:0.78rem;color:var(--gray-400);margin-top:0.5rem;">
+                提交时自动记录时间；修改已提交的成绩不会改变原记录时间。
+            </div>
+            <div style="margin-top:1rem;border-top:1px solid var(--gray-100);padding-top:0.75rem;">
+                <div style="font-size:0.85rem;font-weight:600;color:var(--gray-700);margin-bottom:0.4rem;">💡 失误点（点选，可多选）</div>
+                <div class="mistake-tags" id="mistakeTags" style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-bottom:0.5rem;"></div>
+                <div class="form-row">
+                    <input type="text" id="mistakeOtherInput" aria-label="其他失误" placeholder="其他（手动输入）" maxlength="30" style="flex:1;min-width:140px;" />
+                    <button type="button" class="btn btn-sm btn-outline" id="mistakeOtherAddBtn">➕ 添加</button>
+                </div>
+                <div class="mistake-tags" id="mistakeOtherTags" style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-top:0.5rem;"></div>
+            </div>
+        </div>
+
+        <!-- 成绩分析 -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">📊 成绩分析</span>
+                <div class="view-toggle" id="analysisTypeToggle">
+                    <button class="view-btn active" data-atype="basic">基础</button>
+                    <button class="view-btn" data-atype="random">随机</button>
+                </div>
+            </div>
+            <div id="analysisContent">
+                <!-- Rendered by JS -->
+            </div>
+        </div>
+
+        <!-- 下方：历史记录 -->
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">📋 历次录入</span>
+                <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                    <span class="card-subtitle" id="entryListCount"></span>
+                    <button class="btn btn-sm btn-outline" id="exportEntryBtn" title="导出我的成绩（姓名/任务类型/得分/用时/记录时间）">📤 导出</button>
+                </div>
+            </div>
+            <div id="entryListContent">
+                <!-- Rendered by JS -->
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Toast Container ========== -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script src="stu_tool.js"></script>
+</body>
+</html>

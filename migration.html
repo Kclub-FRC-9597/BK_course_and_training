@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>数据迁移 - MakeX Inspire 成绩统计系统</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <script src="shared.js"></script>
+    <script src="shared_indexdb.js"></script>
+    <script src="header.js"></script>
+
+    <div class="container">
+        <!-- ====== 数据备份 / 跨设备同步 ====== -->
+        <div class="card" style="margin-bottom:1rem;">
+            <div class="card-header" style="margin-bottom:0;">
+                <span class="card-title">📦 数据备份 / 跨设备同步</span>
+                <span style="font-size:0.82rem;font-weight:400;color:var(--gray-500);">导出全部 localStorage 数据，导入后可跨设备恢复</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;padding-top:0.25rem;">
+                <button class="btn btn-primary btn-sm" id="exportDataBtn">⬇️ 导出全部数据</button>
+                <button class="btn btn-outline btn-sm" id="importDataBtn">⬆️ 导入数据</button>
+                <input type="file" id="importFileInput" accept=".json,application/json" style="display:none;" />
+            </div>
+        </div>
+
+    </div>
+
+    <!-- ========== Modal: 导入数据 ========== -->
+    <div class="modal-overlay" id="importModal">
+        <div class="modal-box" style="max-width:480px;">
+            <h3>⬆️ 导入数据</h3>
+            <div id="importPreviewInfo" style="font-size:0.85rem;color:var(--gray-600);margin-bottom:0.5rem;white-space:pre-wrap;line-height:1.6;"></div>
+            <div id="importKeyList" style="max-height:160px;overflow-y:auto;font-size:0.8rem;background:#f8fafc;padding:0.5rem 0.75rem;border-radius:6px;font-family:monospace;white-space:pre-wrap;line-height:1.6;margin-bottom:0.75rem;"></div>
+            <div class="form-group">
+                <label>导入方式</label>
+                <label style="display:inline-flex;align-items:center;gap:0.3rem;cursor:pointer;font-size:0.88rem;margin-right:1rem;">
+                    <input type="radio" name="importMode" value="overwrite" checked style="accent-color:var(--primary);">
+                    整体覆盖（先清空再写入）
+                </label>
+                <label style="display:inline-flex;align-items:center;gap:0.3rem;cursor:pointer;font-size:0.88rem;">
+                    <input type="radio" name="importMode" value="merge" style="accent-color:var(--primary);">
+                    合并写入（保留其他数据）
+                </label>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-outline" id="importModalCancel">取消</button>
+                <button class="btn btn-primary" id="importModalConfirm">确认导入</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Toast Container ========== -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script src="migration.js"></script>
+</body>
+</html>

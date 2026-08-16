@@ -1,0 +1,970 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>成绩展示 - MakeX Inspire 成绩统计系统</title>
+    <link rel="stylesheet" href="style.css" />
+    <style>
+        /* ===== Display Page Overrides ===== */
+        :root {
+            --display-bg: #0f172a;
+            --display-card: #1e293b;
+            --display-card-alt: #263348;
+            --display-text: #e2e8f0;
+            --display-muted: #94a3b8;
+            --display-accent: #38bdf8;
+            --display-gold: #fbbf24;
+            --display-silver: #94a3b8;
+            --display-bronze: #fb923c;
+            --display-rank-1: #fbbf24;
+            --display-rank-2: #c0c0c0;
+            --display-rank-3: #cd7f32;
+            --font-scale: 1;
+        }
+        body {
+            background: var(--display-bg);
+            color: var(--display-text);
+        }
+
+        /* Hide header & sidebar on display page */
+        header, .sidebar, .layout { display: contents !important; }
+        .container {
+            max-width: 100% !important;
+            padding: 1rem 2rem !important;
+            margin: 0 !important;
+        }
+        .main-content {
+            max-height: none !important;
+            padding: 0 !important;
+        }
+
+        /* ===== Top Bar ===== */
+        .display-topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+            margin-bottom: 1.25rem;
+            flex-wrap: wrap;
+        }
+        .display-topbar h1 {
+            font-size: 1.4rem;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            white-space: nowrap;
+        }
+        .display-topbar .training-select {
+            background: var(--display-card);
+            color: var(--display-text);
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 8px;
+            padding: 0.5rem 2rem 0.5rem 0.75rem;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 0.6rem center;
+        }
+        .display-topbar .training-select:focus {
+            border-color: var(--display-accent);
+            outline: none;
+        }
+        .display-topbar .meta {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+            font-size: 0.85rem;
+            color: var(--display-muted);
+        }
+        .display-topbar .meta strong {
+            color: var(--display-text);
+        }
+        .display-topbar .btn-fullscreen {
+            background: var(--display-card);
+            color: var(--display-text);
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 8px;
+            padding: 0.5rem 1rem;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .display-topbar .btn-fullscreen:hover {
+            background: var(--display-card-alt);
+            border-color: var(--display-accent);
+        }
+        .display-topbar .btn-fullscreen:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+        .display-selectors {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .display-selectors .selector-arrow {
+            color: var(--display-muted);
+            font-size: 1.1rem;
+            font-weight: 700;
+        }
+        .display-topbar .training-select:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        .display-last-update {
+            font-size: 0.75rem;
+            color: var(--display-muted);
+            text-align: right;
+            margin-bottom: 0.75rem;
+            transition: opacity 0.3s;
+        }
+        .display-last-update.flash {
+            color: var(--display-accent);
+        }
+
+        /* ===== Font Scale (applied to score table area) ===== */
+        #displayContent {
+            font-size: calc(1rem * var(--font-scale));
+        }
+        #displayContent .display-table {
+            font-size: calc(1.15rem * var(--font-scale));
+        }
+        #displayContent .display-table thead th {
+            font-size: calc(0.8rem * var(--font-scale));
+        }
+        #displayContent .display-table thead th.col-task-group {
+            font-size: calc(0.82rem * var(--font-scale));
+        }
+        #displayContent .display-table thead th.col-round-header {
+            font-size: calc(0.68rem * var(--font-scale));
+        }
+        #displayContent .display-table tbody td {
+            padding: 0 calc(0.4rem * var(--font-scale));
+        }
+        #displayContent .display-table tbody td.cell-name {
+            font-size: calc(0.88rem * var(--font-scale));
+        }
+        #displayContent .display-table tbody td.cell-total {
+            font-size: calc(0.9rem * var(--font-scale));
+        }
+        #displayContent .display-table tbody td.cell-total .total-time {
+            font-size: calc(1rem * var(--font-scale));
+        }
+        #displayContent .display-table tbody td.cell-round {
+            font-size: calc(0.95rem * var(--font-scale));
+        }
+        #displayContent .display-table tbody td.cell-round .round-time {
+            font-size: calc(1rem * var(--font-scale));
+        }
+        #displayContent .display-table tbody td.cell-round .round-score {
+            font-size: calc(0.65rem * var(--font-scale));
+        }
+        #displayContent .display-table .rank-badge {
+            width: calc(30px * var(--font-scale));
+            height: calc(30px * var(--font-scale));
+            font-size: calc(0.95rem * var(--font-scale));
+        }
+        #displayContent .display-table .rank-1 {
+            font-size: calc(1.2rem * var(--font-scale));
+        }
+        #displayContent .display-table .rank-other {
+            font-size: calc(0.85rem * var(--font-scale));
+        }
+
+        /* ===== Empty State ===== */
+        .display-empty {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 50vh;
+            color: var(--display-muted);
+            text-align: center;
+            gap: 0.75rem;
+        }
+        .display-empty .icon { font-size: 4rem; opacity: 0.3; }
+        .display-empty h2 { font-size: 1.5rem; font-weight: 400; }
+        .display-empty p { font-size: 0.9rem; max-width: 400px; line-height: 1.6; }
+
+        /* ===== Score Table ===== */
+        .display-table-wrapper {
+            overflow-x: auto;
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+        .display-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 1.15rem;
+            min-width: 700px;
+        }
+        .display-table thead th {
+            background: var(--display-card);
+            padding: 0.2rem 0.5rem;
+            font-weight: 700;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--display-muted);
+            border-bottom: 2px solid rgba(255,255,255,0.1);
+            position: sticky;
+            top: 0;
+            z-index: 5;
+            white-space: nowrap;
+        }
+        .display-table thead th.col-rank { width: 60px; text-align: center; }
+        .display-table thead th.col-name { text-align: left; width: 12ch; min-width: 12ch; }
+        .display-table thead th.col-total { text-align: center; min-width: 80px; background: rgba(56,189,248,0.12); color: var(--display-accent); font-size:0.9rem; }
+
+        .display-table thead th.col-task-group {
+            text-align: center;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            font-size: 0.82rem;
+            color: var(--display-accent);
+        }
+        .display-table thead th.col-round-header {
+            font-size: 0.68rem;
+            font-weight: 400;
+            color: var(--display-muted);
+            padding: 0.15rem 0.3rem;
+        }
+
+        .display-table tbody td {
+            padding: 0 0.4rem;
+            border-top: 1px solid rgba(255,255,255,0.18);
+            border-bottom: 1px solid rgba(255,255,255,0.18);
+            text-align: center;
+            transition: background 0.3s;
+        }
+        .display-table tbody td.cell-name {
+            text-align: left;
+            font-weight: 700;
+            font-size: 0.88rem;
+        }
+        .display-table tbody td.cell-total {
+            font-weight: 800;
+            font-size: 0.9rem;
+            background: rgba(56,189,248,0.06);
+            line-height: 0.85;
+        }
+        .display-table tbody td.cell-total .total-time {
+            display: block;
+            font-size: 1rem;
+            font-weight: 700;
+            color: var(--display-text);
+            margin-bottom: 0.05rem;
+        }
+        .display-table tbody td.cell-total .total-score {
+            display: block;
+            font-size: 0.72rem;
+            color: var(--display-muted);
+        }
+        .display-table tbody td.cell-round {
+            font-size: 0.95rem;
+            font-variant-numeric: tabular-nums;
+            line-height: 0.85;
+        }
+        /* Time is primary (large), score is secondary (small below) */
+        .display-table tbody td.cell-round .round-time {
+            font-size: 1rem;
+            font-weight: 700;
+            color: var(--display-text);
+            display: block;
+        }
+        .display-table tbody td.cell-round .round-score {
+            font-size: 0.65rem;
+            color: var(--display-muted);
+            display: block;
+            margin-top: 0;
+        }
+        /* Non-full-score: score text turns red */
+        .display-table tbody td.cell-round.not-full .round-score {
+            color: var(--danger);
+            font-weight: 700;
+        }
+        /* Full score: green badge */
+        .display-table tbody td.cell-round.is-full .round-score {
+            color: var(--success);
+        }
+        .display-table tbody td.cell-round.withdrawn {
+            color: var(--danger);
+            opacity: 0.6;
+            font-size: 0.9rem;
+        }
+        .display-table tbody tr {
+            transition: background 0.3s;
+        }
+        .display-table tbody tr:hover {
+            background: rgba(255,255,255,0.03);
+        }
+        /* Rank badge - bigger */
+        .display-table .rank-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            font-weight: 800;
+            font-size: 0.95rem;
+        }
+        .display-table .rank-1 { background: rgba(251,191,36,0.2); color: var(--display-gold); font-size:1.2rem; }
+        .display-table .rank-2 { background: rgba(148,163,184,0.25); color: var(--display-silver); }
+        .display-table .rank-3 { background: rgba(251,146,60,0.2); color: var(--display-bronze); }
+        .display-table .rank-other { color: var(--display-muted); font-size:0.85rem; }
+
+        /* ===== Two-Column Layout ===== */
+        .display-main {
+            display: flex;
+            gap: 1.25rem;
+            align-items: flex-start;
+        }
+        #displayContent {
+            flex: 1;
+            min-width: 0;
+        }
+        /* ===== Order Panel (right) ===== */
+        .order-panel {
+            width: 185px;
+            flex-shrink: 0;
+            background: var(--display-card);
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.08);
+            padding: 0.85rem;
+            position: sticky;
+            top: 0.5rem;
+            align-self: flex-start;
+        }
+        .order-panel h3 {
+            font-size: 0.85rem;
+            font-weight: 700;
+            margin: 0 0 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.3rem;
+        }
+        .order-panel .order-round-select {
+            width: 100%;
+            background: var(--display-card-alt);
+            color: var(--display-text);
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 6px;
+            padding: 0.35rem 0.4rem;
+            font-size: 0.78rem;
+            font-weight: 600;
+            cursor: pointer;
+            margin-bottom: 0.6rem;
+            font-family: inherit;
+        }
+        .order-panel .order-section {
+            margin-bottom: 0.5rem;
+        }
+        .order-panel .order-section-title {
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--display-muted);
+            margin-bottom: 0.25rem;
+            padding-bottom: 0.2rem;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+        .order-panel .order-section-title.active-title { color: var(--display-accent); }
+        .order-panel .order-section-title.done-title { color: var(--success); }
+        .order-panel .order-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+            margin-bottom: 0.5rem;
+        }
+        .order-panel .btn-order {
+            padding: 0.4rem 0.5rem;
+            border-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.15);
+            background: var(--display-card-alt);
+            color: var(--display-text);
+            font-size: 0.78rem;
+            cursor: pointer;
+            transition: 0.2s;
+            text-align: center;
+            font-weight: 600;
+            font-family: inherit;
+        }
+        .order-panel .btn-order:hover {
+            background: rgba(56,189,248,0.15);
+            border-color: var(--display-accent);
+        }
+        .order-panel .btn-order.accent {
+            background: rgba(56,189,248,0.2);
+            border-color: var(--display-accent);
+            color: var(--display-accent);
+        }
+        .order-panel .order-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .order-panel .order-list li {
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.3rem 0.3rem;
+            border-radius: 4px;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: background 0.15s, opacity 0.15s;
+            user-select: none;
+        }
+        .order-panel .order-list li:hover {
+            background: rgba(255,255,255,0.05);
+        }
+        .order-panel .order-list li.done {
+            opacity: 0.55;
+        }
+        .order-panel .order-list li .order-num {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: rgba(56,189,248,0.15);
+            color: var(--display-accent);
+            font-size: 0.72rem;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+        .order-panel .order-empty {
+            color: var(--display-muted);
+            font-size: 0.78rem;
+            text-align: center;
+            padding: 1rem 0;
+        }
+        .display-table .score-highlight {
+            animation: scorePop 0.5s ease;
+        }
+        @keyframes scorePop {
+            0% { transform: scale(1); }
+            40% { transform: scale(1.2); color: var(--display-accent); }
+            100% { transform: scale(1); }
+        }
+
+        /* Competition type label */
+        .mock-type-badge {
+            display: inline-block;
+            font-size: 0.7rem;
+            padding: 0.15rem 0.5rem;
+            border-radius: 10px;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+        }
+        .mock-type-badge.mock { background: rgba(56,189,248,0.15); color: var(--display-accent); }
+        .mock-type-badge.official { background: rgba(251,191,36,0.15); color: var(--display-gold); }
+
+        /* ===== Responsive ===== */
+        @media (max-width: 768px) {
+            .container { padding: 0.75rem !important; }
+            .display-topbar { flex-direction: column; align-items: flex-start; }
+            .display-table { font-size: 0.85rem; }
+        }
+    </style>
+</head>
+<body>
+    <script src="shared.js"></script>
+    <script src="shared_indexdb.js"></script>
+    <script src="analysis.js"></script>
+    <script src="schedule.js"></script>
+    <!-- No header.js — display page has its own minimal UI -->
+
+    <div class="container">
+        <!-- Top Bar -->
+        <div class="display-topbar">
+            <h1>📊 成绩实时展示</h1>
+            <div class="display-selectors">
+                <select class="training-select" id="trainingSelect">
+                    <option value="">-- 选择集训 --</option>
+                </select>
+                <span class="selector-arrow">→</span>
+                <select class="training-select" id="mockSelect" disabled>
+                    <option value="">-- 选择轮次 --</option>
+                </select>
+            </div>
+            <div class="meta">
+                <span>👥 <strong id="dispStudentCount">0</strong> 名学员</span>
+            </div>
+            <button class="btn-fullscreen" id="btnFontDown" title="缩小字号">A<sup>−</sup></button>
+            <button class="btn-fullscreen" id="btnFontUp" title="放大字号">A<sup>+</sup></button>
+            <button class="btn-fullscreen" id="btnFullscreen" title="全屏展示 (F11)">⛶ 全屏</button>
+        </div>
+
+        <!-- Last Update Indicator -->
+        <div class="display-last-update" id="lastUpdate"></div>
+
+        <!-- Main: Two columns -->
+        <div class="display-main">
+            <div id="displayContent">
+                <div class="display-empty">
+                    <div class="icon">📊</div>
+                    <h2>选择一个集训开始展示</h2>
+                    <p>在「集训管理」页面录入成绩后，此页面将自动实时更新</p>
+                </div>
+            </div>
+            <aside class="order-panel" id="orderPanel">
+                <div class="order-empty">请先选择集训</div>
+            </aside>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script>
+    // =================================================================
+    //  Display App — 成绩实时展示（纯只读，零写入）
+    //  架构：订阅 Shared.onDataChange → 自动重新渲染
+    //  跨页面联动：training.html saveData() → storage 事件 → 本页 auto-refresh
+    // =================================================================
+    const DisplayApp = {
+        _selectedTrainingId: null,
+        _selectedMockId: null,
+        _unsubscribe: null,
+        _fontLevel: 1,           // 1=标准, 0=小, 2=大, 3=超大
+        _fontScales: [0.72, 1, 1.35, 1.75],
+        _orderList: [],          // 出场顺序 [studentId, ...]
+        _orderRoundId: null,     // 出场顺序面板当前选中的任务轮次 (taskId_RN)
+
+        init() {
+            Shared.loadData();
+            // Read URL params
+            const params = new URLSearchParams(window.location.search);
+            this._selectedTrainingId = params.get('id') || Shared.data.currentTrainingId || null;
+            this._selectedMockId = params.get('mock') || null;
+            this._populateTrainingSelect();
+            this._populateMockSelect();
+            this._updateURL();
+            // Restore saved font size
+            const savedLevel = parseInt(localStorage.getItem('display_font_level') || '1', 10);
+            if (savedLevel >= 0 && savedLevel < this._fontScales.length) this._fontLevel = savedLevel;
+            this._applyFontScale();
+            this._loadOrder();
+            this.render();
+
+            // 订阅数据变化
+            this._unsubscribe = Shared.onDataChange((source) => {
+                this._populateTrainingSelect();
+                this._populateMockSelect();
+                this._loadOrder();
+                this.render();
+                this._flashUpdate(source);
+            }, 'display');
+        },
+
+        destroy() {
+            if (this._unsubscribe) this._unsubscribe();
+        },
+
+        // ============ Helpers ============
+        getRounds(entry) { return Shared.getRounds(entry); },
+        getBestScore(entry) { return Shared.getBestScore(entry); },
+        getBestScoreTime(entry) { return Shared.getBestScoreTime(entry); },
+        getDisplayScore(entry) { return Shared.getDisplayScore(entry); },
+        escapeHtml(str) { return Shared.escapeHtml(str); },
+
+        _updateURL() {
+            const url = new URL(window.location);
+            if (this._selectedTrainingId) url.searchParams.set('id', this._selectedTrainingId);
+            else url.searchParams.delete('id');
+            if (this._selectedMockId) url.searchParams.set('mock', this._selectedMockId);
+            else url.searchParams.delete('mock');
+            window.history.replaceState({}, '', url);
+        },
+
+        // ============ Training Select ============
+        _populateTrainingSelect() {
+            const select = document.getElementById('trainingSelect');
+            const trainings = Shared.data.trainings || [];
+            const currentVal = this._selectedTrainingId;
+            // Preserve existing selection if still valid
+            if (currentVal && !trainings.some(t => t.id === currentVal)) {
+                this._selectedTrainingId = null;
+                this._selectedMockId = null;
+            }
+            select.innerHTML = '<option value="">-- 选择集训 --</option>' +
+                trainings.map(t =>
+                    `<option value="${t.id}" ${t.id === this._selectedTrainingId ? 'selected' : ''}>${this.escapeHtml(t.name)}</option>`
+                ).join('');
+        },
+
+        // ============ Mock (轮次) Select ============
+        _populateMockSelect() {
+            const select = document.getElementById('mockSelect');
+            const tid = this._selectedTrainingId;
+            if (!tid) {
+                select.innerHTML = '<option value="">-- 选择轮次 --</option>';
+                select.disabled = true;
+                return;
+            }
+            const training = Shared.data.trainings.find(t => t.id === tid);
+            const mocks = training ? (training.mockCompetitions || []) : [];
+            select.disabled = mocks.length === 0;
+
+            // Preserve existing selection if still valid
+            if (this._selectedMockId && !mocks.some(m => m.id === this._selectedMockId)) {
+                this._selectedMockId = null;
+            }
+            // Auto-select latest mock if none selected and mocks exist
+            if (!this._selectedMockId && mocks.length > 0) {
+                this._selectedMockId = mocks[mocks.length - 1].id;
+            }
+
+            select.innerHTML = '<option value="">-- 选择轮次 --</option>' +
+                mocks.map((m, i) => {
+                    const typeIcon = m.type === 'official' ? '🏆' : '🏅';
+                    const dateStr = m.date ? ` ${m.date}` : '';
+                    const label = `${typeIcon} 第${i + 1}轮 — ${this.escapeHtml(m.name || '未命名')}${dateStr}`;
+                    return `<option value="${m.id}" ${m.id === this._selectedMockId ? 'selected' : ''}>${label}</option>`;
+                }).join('');
+        },
+
+        // ============ Flash Update Indicator ============
+        _flashUpdate(source) {
+            const el = document.getElementById('lastUpdate');
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString('zh-CN', { hour12: false });
+            const sourceLabel = source === 'storage' ? '来自其他页面' : '本地更新';
+            el.textContent = `🔄 数据已更新 — ${timeStr} (${sourceLabel})`;
+            el.classList.add('flash');
+            setTimeout(() => el.classList.remove('flash'), 1500);
+        },
+
+        // ============ Render ============
+        render() {
+            const tid = this._selectedTrainingId;
+            const mid = this._selectedMockId;
+            const container = document.getElementById('displayContent');
+            const D = Shared.data;
+
+            if (!tid) {
+                container.innerHTML = `
+                    <div class="display-empty">
+                        <div class="icon">📊</div>
+                        <h2>选择集训和轮次开始展示</h2>
+                        <p>在「集训管理」页面录入成绩后，此页面将自动实时更新</p>
+                    </div>`;
+                document.getElementById('dispStudentCount').textContent = '0';
+                document.getElementById('lastUpdate').textContent = '';
+                document.querySelector('.display-topbar h1').textContent = '📊 成绩实时展示';
+                return;
+            }
+
+            const training = D.trainings.find(t => t.id === tid);
+            if (!training) {
+                container.innerHTML = `<div class="display-empty"><div class="icon">❓</div><h2>集训不存在</h2></div>`;
+                return;
+            }
+
+            const mocks = training.mockCompetitions || [];
+            const studentIds = training.studentIds || [];
+            const students = D.students.filter(s => studentIds.includes(s.id));
+
+            document.getElementById('dispStudentCount').textContent = students.length;
+            document.querySelector('.display-topbar h1').textContent = `📊 ${this.escapeHtml(training.name)}`;
+
+            if (mocks.length === 0) {
+                container.innerHTML = `
+                    <div class="display-empty">
+                        <div class="icon">📝</div>
+                        <h2>「${this.escapeHtml(training.name)}」暂无记录</h2>
+                        <p>请在集训管理页面为该集训添加模拟赛/正赛记录并录入成绩</p>
+                    </div>`;
+                document.getElementById('lastUpdate').textContent = '';
+                return;
+            }
+
+            if (!mid) {
+                container.innerHTML = `
+                    <div class="display-empty">
+                        <div class="icon">🎯</div>
+                        <h2>请选择要展示的轮次</h2>
+                        <p>该集训共有 <strong>${mocks.length}</strong> 条记录，请在上方选择具体轮次</p>
+                    </div>`;
+                return;
+            }
+
+            const mock = mocks.find(m => m.id === mid);
+            if (!mock) {
+                container.innerHTML = `<div class="display-empty"><div class="icon">❓</div><h2>该轮次不存在</h2></div>`;
+                return;
+            }
+
+            // --- Render single mock ---
+            const mockTasks = mock.tasks || [];
+            // Build flat round-column list: [ { taskId, taskName, roundNum, maxRounds, maxScore } ]
+            const roundColumns = [];
+            mockTasks.forEach(ti => {
+                const def = D.tasks.find(td => td.id === ti.taskId);
+                const name = def ? def.name : '未知任务';
+                const maxScore = def ? (def.maxScore || null) : null;
+                const nRounds = ti.rounds || 1;
+                for (let r = 1; r <= nRounds; r++) {
+                    roundColumns.push({ taskId: ti.taskId, taskName: name, roundNum: r, maxRounds: nRounds, maxScore });
+                }
+            });
+
+            // Group by task for the header row
+            const taskGroups = [];
+            mockTasks.forEach(ti => {
+                const def = D.tasks.find(td => td.id === ti.taskId);
+                taskGroups.push({
+                    taskId: ti.taskId,
+                    name: def ? def.name : '未知任务',
+                    rounds: ti.rounds || 1
+                });
+            });
+
+            const rankings = Analysis.calcRankings(
+                mock.scores || {}, mockTasks, students,
+                (entry) => Shared.getRounds(entry)
+            );
+
+            const sorted = students.map(s => ({
+                ...s,
+                rank: rankings[s.id] || null,
+            })).sort((a, b) => {
+                if (!a.rank && !b.rank) return a.name.localeCompare(b.name, 'zh');
+                if (!a.rank) return 1;
+                if (!b.rank) return -1;
+                return a.rank - b.rank;
+            });
+
+            // Build two-row header: task group names + round labels
+            const headerRow1 = taskGroups.map(tg =>
+                `<th class="col-task-group" colspan="${tg.rounds}">${this.escapeHtml(tg.name)}</th>`
+            ).join('');
+            const headerRow2 = roundColumns.map(rc =>
+                `<th class="col-round-header">R${rc.roundNum}</th>`
+            ).join('');
+
+            const html = `
+                <div class="display-table-wrapper">
+                    <table class="display-table">
+                        <thead>
+                            <tr>
+                                <th class="col-name" rowspan="2">学员</th>
+                                ${headerRow1}
+                                <th class="col-total" rowspan="2">总分</th>
+                                <th class="col-rank" rowspan="2">排名</th>
+                            </tr>
+                            <tr>
+                                ${headerRow2}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${sorted.map(s => this._renderStudentRow(s, mock, roundColumns)).join('')}
+                        </tbody>
+                    </table>
+                </div>`;
+
+            container.innerHTML = html;
+            this._renderOrderPanel();
+        },
+
+        _renderStudentRow(student, mock, roundColumns) {
+            const scores = mock.scores || {};
+            const studentScores = scores[student.id] || {};
+
+            let totalScore = 0;
+            let totalTime = 0;
+            let hasAny = false;
+
+            // Compute per-task best scores for total
+            const taskBest = {}; // taskId → bestScore
+            if (mock.tasks) {
+                mock.tasks.forEach(ti => {
+                    const entry = studentScores[ti.taskId];
+                    if (!entry) return;
+                    const rounds = this.getRounds(entry);
+                    let best = null;
+                    let bestTime = null;
+                    rounds.forEach(r => {
+                        if (r.withdrawn) { if (best === null) { best = 0; bestTime = 150; } return; }
+                        if (r.score === undefined || r.score === null) return;
+                        if (best === null || r.score > best ||
+                            (r.score === best && r.time != null && (bestTime === null || r.time < bestTime))) {
+                            best = r.score;
+                            bestTime = r.time ?? null;
+                        }
+                    });
+                    if (best !== null) {
+                        taskBest[ti.taskId] = best;
+                        totalScore += best;
+                        if (bestTime !== null) totalTime += bestTime;
+                        hasAny = true;
+                    }
+                });
+            }
+
+            // Render each round column
+            const roundCells = roundColumns.map(rc => {
+                const entry = studentScores[rc.taskId];
+                if (!entry) return '<td class="cell-round">—</td>';
+
+                const rounds = this.getRounds(entry);
+                const r = rounds[rc.roundNum - 1]; // 0-based
+
+                if (!r) return '<td class="cell-round">—</td>';
+
+                if (r.withdrawn) {
+                    return '<td class="cell-round withdrawn">弃权</td>';
+                }
+                if (r.score === undefined || r.score === null) {
+                    return '<td class="cell-round">—</td>';
+                }
+
+                // Time is primary (large), score is secondary (small below)
+                const timeStr = (r.time !== null && r.time !== undefined)
+                    ? `<span class="round-time">${r.time}s</span>` : '<span class="round-time">—</span>';
+
+                // Determine score class: red if not full, green if full
+                let scoreClass = 'round-score';
+                if (rc.maxScore !== null && rc.maxScore !== undefined) {
+                    if (r.score < rc.maxScore) scoreClass += ' not-full';
+                    else if (r.score >= rc.maxScore) scoreClass += ' is-full';
+                }
+                const scoreStr = `<span class="${scoreClass}">${r.score}分</span>`;
+
+                // Add not-full class to cell if score < maxScore
+                const cellClass = (rc.maxScore !== null && r.score < rc.maxScore) ? 'cell-round not-full' : 'cell-round';
+
+                return `<td class="${cellClass}">${timeStr}${scoreStr}</td>`;
+            }).join('');
+
+            // Rank badge
+            let rankHtml;
+            if (student.rank === 1) rankHtml = '<span class="rank-badge rank-1">🥇</span>';
+            else if (student.rank === 2) rankHtml = '<span class="rank-badge rank-2">🥈</span>';
+            else if (student.rank === 3) rankHtml = '<span class="rank-badge rank-3">🥉</span>';
+            else if (student.rank) rankHtml = `<span class="rank-badge rank-other">${student.rank}</span>`;
+            else rankHtml = '<span style="color:var(--display-muted);">—</span>';
+
+            return `
+                <tr>
+                    <td class="cell-name">${this.escapeHtml(student.name)}</td>
+                    ${roundCells}
+                    <td class="cell-total">${hasAny ? '<span class="total-time">' + totalTime.toFixed(3) + 's</span><span class="total-score">' + totalScore.toFixed(1) + '</span>' : '—'}</td>
+                    <td>${rankHtml}</td>
+                </tr>`;
+        },
+
+        // ============ Event Bindings ============
+        bindEvents() {
+            document.getElementById('trainingSelect').addEventListener('change', (e) => {
+                this._selectedTrainingId = e.target.value || null;
+                // Reset mock when training changes — will auto-select latest in _populateMockSelect
+                this._selectedMockId = null;
+                this._populateMockSelect();
+                this._updateURL();
+                this._loadOrder();
+                this.render();
+            });
+
+            document.getElementById('mockSelect').addEventListener('change', (e) => {
+                this._selectedMockId = e.target.value || null;
+                this._updateURL();
+                this.render();
+            });
+
+            document.getElementById('btnFullscreen').addEventListener('click', () => {
+                if (document.fullscreenElement) {
+                    document.exitFullscreen();
+                } else {
+                    document.documentElement.requestFullscreen();
+                }
+            });
+
+            document.getElementById('btnFontUp').addEventListener('click', () => {
+                this._changeFontSize(1);
+            });
+            document.getElementById('btnFontDown').addEventListener('click', () => {
+                this._changeFontSize(-1);
+            });
+        },
+
+        // ============ Font Size ============
+        _applyFontScale() {
+            document.documentElement.style.setProperty('--font-scale', this._fontScales[this._fontLevel]);
+            document.getElementById('btnFontUp').disabled = this._fontLevel >= this._fontScales.length - 1;
+            document.getElementById('btnFontDown').disabled = this._fontLevel <= 0;
+            localStorage.setItem('display_font_level', this._fontLevel);
+        },
+
+        _changeFontSize(delta) {
+            const next = this._fontLevel + delta;
+            if (next < 0 || next >= this._fontScales.length) return;
+            this._fontLevel = next;
+            this._applyFontScale();
+        },
+
+        // ============ Order Panel ============
+        _loadOrder() {
+            const tid = this._selectedTrainingId;
+            const training = tid ? Shared.data.trainings.find(t => t.id === tid) : null;
+            const mocks = training ? (training.mockCompetitions || []) : [];
+            const selMock = this._selectedMockId ? mocks.find(m => m.id === this._selectedMockId) : (mocks[mocks.length - 1] || null);
+            this._orderList = Schedule.loadOrder(selMock, training ? (training.studentIds || []) : []);
+            // Sync round selection from training page
+            const syncedRound = Schedule.loadRoundId(selMock);
+            if (syncedRound) this._orderRoundId = syncedRound;
+            if (!this._orderRoundId && training) {
+                if (selMock && selMock.tasks && selMock.tasks.length > 0) {
+                    this._orderRoundId = selMock.tasks[0].taskId + '_R1';
+                }
+            }
+        },
+
+        _renderOrderPanel() {
+            const panel = document.getElementById('orderPanel');
+            const tid = this._selectedTrainingId;
+            if (!tid) {
+                panel.innerHTML = '<h3>🎯 赛程</h3><div class="order-empty">请先选择集训</div>';
+                return;
+            }
+            const training = Shared.data.trainings.find(t => t.id === tid);
+            if (!training) {
+                panel.innerHTML = '<h3>🎯 赛程</h3><div class="order-empty">集训不存在</div>';
+                return;
+            }
+            if (!(training.studentIds || []).length) {
+                panel.innerHTML = '<h3>🎯 赛程</h3><div class="order-empty">该集训无学员</div>';
+                return;
+            }
+            Schedule.renderDisplayPanel(panel, training, this._orderList,
+                this._selectedMockId, this._orderRoundId,
+                (s) => this.escapeHtml(s));
+        },
+    };
+
+    // ============ Bootstrap ============
+    document.addEventListener('DOMContentLoaded', () => {
+        DisplayApp.init();
+        DisplayApp.bindEvents();
+
+        // Handle fullscreen change
+        document.addEventListener('fullscreenchange', () => {
+            const btn = document.getElementById('btnFullscreen');
+            btn.textContent = document.fullscreenElement ? '⛶ 退出全屏' : '⛶ 全屏';
+        });
+    });
+
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', () => {
+        DisplayApp.destroy();
+    });
+    </script>
+</body>
+</html>
