@@ -1,0 +1,11 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "move-inspire-to-public",
+			"type": "shell",
+			"command": "cmd /c \"if not exist public mkdir public & move *.html public >nul & move *.js public >nul & move *.css public >nul & move CNAME public >nul & echo ===DONE=== & dir /b public\"",
+			"isBackground": false
+		}
+	]
+}
