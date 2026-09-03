@@ -13,16 +13,25 @@
     const trainingIdParam = searchParams.get('id');
 
     const isAboutPage = path === 'about.html';
+    const isEntryPage = path === 'index.html';
+    const isDevtoolsPage = path === 'devtools.html';
+    // about / 工具中心页：隐藏侧边栏（独立布局），仅保留顶部导航 + footer
+    const isPlainPage = isAboutPage || isEntryPage || isDevtoolsPage;
+    // 是否显示左侧导航栏（about / 工具中心无；开发者工具有专属锚点导航）
+    const hasSidebar = !isPlainPage || isDevtoolsPage;
 
     // Skip header/sidebar injection on display page (has its own UI)
     if (path === 'display.html') return;
 
     let activeMenu = 'stats';
     switch (path) {
+        case 'index.html':    activeMenu = 'entry';    break;
+        case 'explorer.html': activeMenu = 'explorer'; break;
         case 'stats.html':    activeMenu = 'stats';    break;
         case 'training.html': activeMenu = 'training'; break;
         case 'tasks.html':    activeMenu = 'tasks';    break;
         case 'admin.html':     activeMenu = 'education';  break;
+        case 'evaluation.html': activeMenu = 'evaluation'; break;
         case 'student.html':   activeMenu = 'student';    break;
         case 'stu_tool.html':  activeMenu = 'stu_tool';   break;
         case 'migration.html': activeMenu = 'migration'; break;
@@ -32,13 +41,16 @@
     }
 
     let category;
-    if (['stats', 'training', 'tasks', 'display'].includes(activeMenu)) {
+    if (activeMenu === 'entry') {
+        category = 'home';
+    } else if (['stats', 'training', 'tasks', 'display', 'explorer'].includes(activeMenu)) {
         category = 'competition';
     } else {
         category = 'education';
     }
 
     const categoryTabs = [
+        { key: 'home',        label: '🏠 首页', href: 'index.html' },
         { key: 'competition', label: '🏆 赛事', href: 'stats.html' },
         { key: 'education',   label: '📚 后台', href: 'admin.html' },
     ];
@@ -55,12 +67,13 @@
 </div>
 <header>
     <div class="header-inner">
-        ${isAboutPage ? '' : '<button class="sidebar-toggle" id="sidebarToggle" aria-label="切换菜单">☰</button>'}
-        <a href="/" class="back-home" title="返回 9597 主站">← 主页</a>
+        ${hasSidebar ? '<button class="sidebar-toggle" id="sidebarToggle" aria-label="切换菜单">☰</button>' : ''}
+        <a href="index.html" class="back-home" title="返回首页">← 主页</a>
         <span class="logo">🏆 MakeX Inspire</span>
         <div class="header-tabs">
             ${categoryTabs.map(t =>
-                `<a href="${t.href}" class="header-tab${category === t.key && !isAboutPage ? ' active' : ''}">${t.label}</a>`
+                // 首页（index.html）高亮「🏠 首页」；about / 开发者工具页无对应分类 tab，抑制高亮
+                `<a href="${t.href}" class="header-tab${category === t.key && !(isAboutPage || isDevtoolsPage) ? ' active' : ''}">${t.label}</a>`
             ).join('')}
         </div>
         <div class="header-spacer"></div>
@@ -111,15 +124,15 @@
         ).join('');
 
         const sidebarCollapsed = localStorage.getItem('sidebar_collapsed') === 'true';
-        const sidebarHtml = isAboutPage ? '' : `
+        const sidebarHtml = hasSidebar ? `
 <aside class="sidebar${sidebarCollapsed ? ' collapsed' : ''}" id="sidebar">
     <div class="sidebar-menu">
-        ${category === 'competition' ? buildCompetitionMenu(trainingMenuItems, shouldExpand) : buildEducationMenu()}
+        ${isDevtoolsPage ? buildDevtoolsMenu() : (category === 'competition' ? buildCompetitionMenu(trainingMenuItems, shouldExpand) : buildEducationMenu())}
     </div>    <div class="sidebar-footer">
         <button class="sidebar-collapse-btn" id="sidebarCollapseBtn" title="${sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}">${sidebarCollapsed ? '▶' : '◀'}</button>
     </div>    <div class="sidebar-popover" id="sidebarPopover"></div>
 </aside>
-<div class="sidebar-overlay" id="sidebarOverlay"></div>`;
+<div class="sidebar-overlay" id="sidebarOverlay"></div>` : '';
 
         function buildCompetitionMenu(subItems, expanded) {
             const isActive = activeMenu === 'training';
@@ -146,18 +159,31 @@
         }
 
         function buildEducationMenu() {
+            const hash = window.location.hash;
             return `
-                <a href="admin.html" class="sidebar-item${activeMenu === 'education' ? ' active' : ''}">
+                <a href="admin.html" class="sidebar-item${activeMenu === 'education' && !hash ? ' active' : ''}">
                     <span class="icon">🏫</span>教务管理
+                </a>
+                <a href="admin.html#sec-backup" class="sidebar-item${hash === '#sec-backup' ? ' active' : ''}">
+                    <span class="icon">📦</span>数据备份
+                </a>
+                <a href="evaluation.html" class="sidebar-item${activeMenu === 'evaluation' ? ' active' : ''}">
+                    <span class="icon">📝</span>评估管理
                 </a>
                 <a href="student.html" class="sidebar-item${activeMenu === 'student' ? ' active' : ''}">
                     <span class="icon">👤</span>个人成绩卡
+                </a>`;
+        }
+
+        // ---- 开发者工具专属侧边栏（本页区块锚点导航） ----
+        function buildDevtoolsMenu() {
+            const hash = window.location.hash;
+            return `
+                <a href="#sec-storage" class="sidebar-item${hash === '#sec-storage' ? ' active' : ''}">
+                    <span class="icon">💾</span>存储引擎
                 </a>
-                <a href="migration.html" class="sidebar-item${activeMenu === 'migration' ? ' active' : ''}">
-                    <span class="icon">🔄</span>数据迁移
-                </a>
-                <a href="devtools.html" class="sidebar-item${activeMenu === 'devtools' ? ' active' : ''}">
-                    <span class="icon">🛠</span>开发者工具
+                <a href="#sec-dbmgr" class="sidebar-item${hash === '#sec-dbmgr' ? ' active' : ''}">
+                    <span class="icon">🗄️</span>数据库管理
                 </a>`;
         }
 
@@ -179,12 +205,22 @@
             }
         });
 
-        if (!isAboutPage) {
+        if (hasSidebar) {
             layout.appendChild(sidebarWrapper.firstElementChild);  // aside.sidebar
             layout.appendChild(sidebarWrapper.lastElementChild);   // div.sidebar-overlay
         }
         layout.appendChild(main);
         document.body.appendChild(layout);
+
+        // ---- 全站 footer（开发者工具入口） ----
+        const footer = document.createElement('footer');
+        footer.className = 'site-footer';
+        footer.innerHTML = `
+            <span class="site-footer-item">MakeX Inspire 成绩统计系统</span>
+            <span class="site-footer-sep">·</span>
+            <a href="devtools.html" class="site-footer-item site-footer-link${activeMenu === 'devtools' ? ' active' : ''}" title="存储引擎 / 数据库管理 / 数据备份">🛠 开发者工具</a>
+        `;
+        document.body.appendChild(footer);
 
         // ---- Training sub-menu toggle ----
         const toggleEl = document.getElementById('sidebarTrainingToggle');
@@ -295,6 +331,11 @@
         }
 
         async function navigateTo(href) {
+            // 工具中心（home）出发：一律整页跳转，避免 SPA 复用入口页布局
+            if (category === 'home') {
+                window.location.href = href;
+                return;
+            }
             // Cross-category: full reload
             const isCompetition = href.includes('stats.html') || href.includes('training.html') || href.includes('tasks.html');
             const currentIsCompetition = category === 'competition';

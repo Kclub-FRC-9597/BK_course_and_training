@@ -9,6 +9,8 @@
         source: 'all',
         selectedStudentId: null,
         _editingPracticeId: null,
+        // 训练成绩记录表筛选状态
+        _recordFilter: { trainingId: '', mockId: '', taskId: '' },
 
         init() {
             Shared.loadData();
@@ -39,6 +41,7 @@
                 sel.addEventListener('change', () => {
                     const sid = sel.value;
                     this.selectedStudentId = sid || null;
+                    this._recordFilter = { trainingId: '', mockId: '', taskId: '' }; // 切换学员重置筛选
                     if (!sid) {
                         document.getElementById('studentCardContent').innerHTML =
                             '<div class="empty-state"><div class="icon">👆</div><p>请在上方选择学员查看个人成绩</p></div>';
@@ -46,12 +49,11 @@
                         return;
                     }
                     this.renderCard(sid, this.source);
-                    this.renderPracticeEntry();
                     this.renderPracticeList();
                 });
             }
-            const submitBtn = document.getElementById('practiceSubmitBtn');
-            if (submitBtn) submitBtn.addEventListener('click', () => this.submitPractice());
+            const headerImportBtn = document.getElementById('importSelfTrainingBtn');
+            if (headerImportBtn) headerImportBtn.addEventListener('click', () => this.openImportPractice());
             const exportBtn = document.getElementById('exportPracticeBtn');
             if (exportBtn) exportBtn.addEventListener('click', () => this.exportPractice());
             const importBtn = document.getElementById('importPracticeBtn');
@@ -68,6 +70,33 @@
             if (impConfirm) impConfirm.addEventListener('click', () => this.confirmImportPractice());
             const impModal = document.getElementById('importPracticeModal');
             if (impModal) impModal.addEventListener('click', (e) => { if (e.target === impModal) this.closeImportPractice(); });
+
+            // ===== 训练成绩记录表筛选 =====
+            const trFilter = document.getElementById('recordTrainingFilter');
+            if (trFilter) trFilter.addEventListener('change', () => {
+                this._recordFilter.trainingId = trFilter.value;
+                this._recordFilter.mockId = ''; // 集训变化后重置赛项
+                this.populateRecordMockFilter();
+                this.renderPracticeList();
+            });
+            const mockFilter = document.getElementById('recordMockFilter');
+            if (mockFilter) mockFilter.addEventListener('change', () => {
+                this._recordFilter.mockId = mockFilter.value;
+                this.renderPracticeList();
+            });
+            const taskFilter = document.getElementById('recordTaskFilter');
+            if (taskFilter) taskFilter.addEventListener('change', () => {
+                this._recordFilter.taskId = taskFilter.value;
+                this.renderPracticeList();
+            });
+            const resetBtn = document.getElementById('recordFilterReset');
+            if (resetBtn) resetBtn.addEventListener('click', () => this.resetRecordFilters());
+        },
+
+        resetRecordFilters() {
+            this._recordFilter = { trainingId: '', mockId: '', taskId: '' };
+            this.populateRecordFilters();
+            this.renderPracticeList();
         },
 
         bindSourceToggle() {
@@ -86,10 +115,8 @@
         },
 
         setPracticeCardsVisible(visible) {
-            ['practiceEntryCard', 'practiceListCard'].forEach((id) => {
-                const el = document.getElementById(id);
-                if (el) el.style.display = visible ? '' : 'none';
-            });
+            const el = document.getElementById('practiceListCard');
+            if (el) el.style.display = visible ? '' : 'none';
         },
 
         // ============ 统计 ============
@@ -274,69 +301,182 @@
                 </div>`;
         },
 
-        // ============ 自主训练录入 ============
+        // ============ 自主训练导入 ============
         getCurrentTraining() {
             const D = Shared.data;
             const id = D.currentTrainingId;
             return (D.trainings || []).find((t) => t.id === id) || (D.trainings || [])[0] || null;
         },
 
-        renderPracticeEntry() {
-            const card = document.getElementById('practiceEntryCard');
-            if (!card) return;
-            const training = this.getCurrentTraining();
-            const nameEl = document.getElementById('practiceEntryTrainingName');
-            if (nameEl) nameEl.textContent = training ? '当前集训：' + training.name : '（无集训）';
-            const taskSel = document.getElementById('practiceTaskSelect');
-            if (!taskSel) return;
-            const tasks = Shared.data.tasks || [];
-            taskSel.innerHTML = '<option value="">— 选择任务 —</option>' + tasks.map((t) =>
-                `<option value="${t.id}">${Shared.escapeHtml(t.name)}</option>`
-            ).join('');
-            document.getElementById('practiceScoreInput').value = '';
-            document.getElementById('practiceTimeInput').value = '';
-            this.setPracticeCardsVisible(true);
-        },
+        // ============ 训练成绩记录表 ============
+        // 汇总某学员在所有集训中的成绩记录（赛项记录 + 自主训练记录）
+        getAllStudentRecords(studentId) {
+            const D = Shared.data;
+            const taskMap = {};
+            (D.tasks || []).forEach((t) => { taskMap[t.id] = t; });
+            const records = [];
 
-        submitPractice() {
-            const studentId = this.selectedStudentId;
-            if (!studentId) { this.toast('请先选择学员', 'warning'); return; }
-            const training = this.getCurrentTraining();
-            if (!training) { this.toast('暂无集训，无法记录', 'warning'); return; }
-            const taskId = document.getElementById('practiceTaskSelect').value;
-            const scoreStr = document.getElementById('practiceScoreInput').value.trim();
-            const timeStr = document.getElementById('practiceTimeInput').value.trim();
-            if (!taskId) { this.toast('请选择任务', 'warning'); return; }
-            const score = parseFloat(scoreStr);
-            if (scoreStr === '' || isNaN(score) || score < 0) { this.toast('请输入有效得分', 'warning'); return; }
-            const time = timeStr ? (Math.round(parseFloat(timeStr) * 1000) / 1000) : null;
-            if (timeStr && isNaN(time)) { this.toast('无效用时', 'warning'); return; }
-
-            if (!training.practiceRecords) training.practiceRecords = [];
-            const date = new Date().toISOString().slice(0, 10);
-            const existingMax = Math.max(0, ...training.practiceRecords
-                .filter((r) => r.date === date && r.studentId === studentId && r.taskId === taskId)
-                .map((r) => r.round || 0));
-            training.practiceRecords.push({
-                id: Shared.generateId(),
-                studentId,
-                taskId,
-                date,
-                round: existingMax + 1,
-                score: Math.round(score),
-                time,
-                source: 'practice',
-                submittedAt: new Date().toISOString(),
+            (D.trainings || []).forEach((training) => {
+                const trainingName = training.name || '（未命名集训）';
+                // ---- 赛项记录（mockCompetitions）----
+                (training.mockCompetitions || []).forEach((mock) => {
+                    if (mock.withdrawn && mock.withdrawn[studentId]) return;
+                    const studentScores = mock.scores && mock.scores[studentId];
+                    if (!studentScores) return;
+                    Object.entries(studentScores).forEach(([taskId, entry]) => {
+                        if (!entry) return;
+                        const rounds = Shared.getRounds(entry);
+                        rounds.forEach((r, idx) => {
+                            if (!r) return;
+                            const score = (r.score !== undefined && r.score !== null) ? r.score : null;
+                            const time = (r.time !== undefined && r.time !== null) ? r.time : null;
+                            if (score === null && time === null) return;
+                            records.push({
+                                kind: 'mock',
+                                trainingId: training.id,
+                                trainingName,
+                                mockId: mock.id,
+                                mockName: mock.name || Shared.getMockTypeText(mock),
+                                competitionType: mock.competitionType || 'mock',
+                                date: mock.date || '',
+                                taskId,
+                                taskName: taskMap[taskId] ? taskMap[taskId].name : taskId,
+                                roundLabel: rounds.length > 1 ? '第' + (idx + 1) + '轮' : '—',
+                                score,
+                                time,
+                                submittedAt: null,
+                                recordId: mock.id + '|' + taskId + '|' + idx,
+                                editable: false,
+                            });
+                        });
+                    });
+                });
+                // ---- 自主训练记录（practiceRecords）----
+                (training.practiceRecords || []).forEach((r) => {
+                    if (r.studentId !== studentId) return;
+                    const score = (r.score !== undefined && r.score !== null) ? r.score : null;
+                    if (score === null) return;
+                    records.push({
+                        kind: 'practice',
+                        trainingId: training.id,
+                        trainingName,
+                        mockId: 'practice',
+                        mockName: '自主训练',
+                        competitionType: 'practice',
+                        date: r.date || (r.submittedAt || '').slice(0, 10) || '',
+                        taskId: r.taskId,
+                        taskName: taskMap[r.taskId] ? taskMap[r.taskId].name : r.taskId,
+                        roundLabel: '第' + (r.round || 1) + '轮',
+                        score,
+                        time: (r.time !== undefined && r.time !== null) ? r.time : null,
+                        submittedAt: r.submittedAt || null,
+                        recordId: r.id,
+                        editable: true,
+                    });
+                });
             });
-            Shared.saveData();
-            document.getElementById('practiceScoreInput').value = '';
-            document.getElementById('practiceTimeInput').value = '';
-            this.toast('已提交自主训练记录');
-            this.renderPracticeList();
-            this.renderCard(studentId, this.source);
+
+            return records;
         },
 
-        // ============ 练习记录列表 ============
+        // 筛选后记录（含排序：日期倒序 → 提交时间倒序）
+        getFilteredRecords() {
+            let records = this.getAllStudentRecords(this.selectedStudentId);
+            const f = this._recordFilter;
+            if (f.trainingId) records = records.filter((r) => r.trainingId === f.trainingId);
+            if (f.mockId) records = records.filter((r) => r.mockId === f.mockId);
+            if (f.taskId) records = records.filter((r) => r.taskId === f.taskId);
+            records.sort((a, b) =>
+                (b.date || '').localeCompare(a.date || '') ||
+                (b.submittedAt || '').localeCompare(a.submittedAt || '') ||
+                (a.trainingName || '').localeCompare(b.trainingName || '') ||
+                (a.mockName || '').localeCompare(b.mockName || '')
+            );
+            return records;
+        },
+
+        // 填充筛选下拉（集训 / 任务 / 赛项）
+        populateRecordFilters() {
+            const studentId = this.selectedStudentId;
+            if (!studentId) return;
+            const trSel = document.getElementById('recordTrainingFilter');
+            const mockSel = document.getElementById('recordMockFilter');
+            const taskSel = document.getElementById('recordTaskFilter');
+            if (!trSel || !mockSel || !taskSel) return;
+            const D = Shared.data;
+
+            // 集训：仅列出该学员有记录（赛项或自主训练）的集训
+            const trainings = (D.trainings || []).filter((t) => {
+                const hasMock = (t.mockCompetitions || []).some((m) =>
+                    m.scores && m.scores[studentId] && Object.keys(m.scores[studentId]).length > 0);
+                const hasPractice = (t.practiceRecords || []).some((r) => r.studentId === studentId);
+                return hasMock || hasPractice;
+            });
+            let trHtml = '<option value="">全部集训</option>';
+            trainings.forEach((t) => {
+                trHtml += `<option value="${Shared.escapeHtml(t.id)}"${this._recordFilter.trainingId === t.id ? ' selected' : ''}>${Shared.escapeHtml(t.name || '（未命名集训）')}</option>`;
+            });
+            trSel.innerHTML = trHtml;
+
+            // 任务：全部任务
+            let taskHtml = '<option value="">全部任务</option>';
+            (D.tasks || []).forEach((t) => {
+                taskHtml += `<option value="${Shared.escapeHtml(t.id)}"${this._recordFilter.taskId === t.id ? ' selected' : ''}>${Shared.escapeHtml(t.name)}</option>`;
+            });
+            taskSel.innerHTML = taskHtml;
+
+            this.populateRecordMockFilter();
+        },
+
+        // 填充赛项下拉（依赖集训筛选）
+        populateRecordMockFilter() {
+            const studentId = this.selectedStudentId;
+            if (!studentId) return;
+            const mockSel = document.getElementById('recordMockFilter');
+            if (!mockSel) return;
+            const D = Shared.data;
+            const f = this._recordFilter;
+            const trainings = f.trainingId
+                ? (D.trainings || []).filter((t) => t.id === f.trainingId)
+                : (D.trainings || []);
+            const mocks = [];
+            let hasPractice = false;
+            trainings.forEach((t) => {
+                if ((t.practiceRecords || []).some((r) => r.studentId === studentId)) hasPractice = true;
+                (t.mockCompetitions || []).forEach((m) => {
+                    const studentScores = m.scores && m.scores[studentId];
+                    if (studentScores && Object.keys(studentScores).length > 0) {
+                        mocks.push(m);
+                    }
+                });
+            });
+            let html = '<option value="">全部赛项</option>';
+            if (hasPractice) {
+                html += `<option value="practice"${f.mockId === 'practice' ? ' selected' : ''}>🎯 自主训练</option>`;
+            }
+            mocks.forEach((m) => {
+                const label = `${Shared.getMockTypeLabel(m)} · ${m.name || Shared.getMockTypeText(m)}`;
+                html += `<option value="${Shared.escapeHtml(m.id)}"${f.mockId === m.id ? ' selected' : ''}>${Shared.escapeHtml(label)}</option>`;
+            });
+            mockSel.innerHTML = html;
+            // 当前 mockId 若已不在选项中则重置
+            if (f.mockId && !Array.from(mockSel.options).some((o) => o.value === f.mockId)) {
+                f.mockId = '';
+            }
+        },
+
+        // 赛项类型徽章
+        renderMockBadge(competitionType) {
+            if (competitionType === 'practice') {
+                return '<span class="task-type-badge" style="background:#e0f2fe;color:#0369a1;">🎯 自主训练</span>';
+            }
+            if (competitionType === 'official') {
+                return '<span class="task-type-badge" style="background:#fef3c7;color:#b45309;">🏆 正赛</span>';
+            }
+            return '<span class="task-type-badge" style="background:#dbeafe;color:#1d4ed8;">🏅 模拟赛</span>';
+        },
+
+        // ============ 训练成绩记录表渲染 ============
         renderPracticeList() {
             const card = document.getElementById('practiceListCard');
             if (!card) return;
@@ -344,38 +484,34 @@
             if (!studentId) { this.setPracticeCardsVisible(false); return; }
             this.setPracticeCardsVisible(true);
 
-            const training = this.getCurrentTraining();
+            this.populateRecordFilters();
+            const records = this.getFilteredRecords();
             const countEl = document.getElementById('practiceListCount');
             const content = document.getElementById('practiceListContent');
-            if (!training || !training.practiceRecords) {
-                if (countEl) countEl.textContent = '';
-                if (content) content.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>暂无自主训练记录</p></div>';
-                return;
-            }
-            const records = training.practiceRecords
-                .filter((r) => r.studentId === studentId)
-                .sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.submittedAt || '').localeCompare(a.submittedAt || ''));
-            const taskMap = {};
-            (Shared.data.tasks || []).forEach((t) => { taskMap[t.id] = t; });
             if (countEl) countEl.textContent = `共 ${records.length} 条`;
             if (records.length === 0) {
-                content.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>暂无自主训练记录</p></div>';
+                content.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>暂无符合条件的成绩记录</p></div>';
                 return;
             }
             content.innerHTML = `<table class="score-table">
-                <thead><tr><th>日期</th><th>任务</th><th>轮次</th><th>得分</th><th>用时</th><th>提交时间</th><th></th></tr></thead>
+                <thead><tr>
+                    <th>日期</th><th>集训</th><th>赛项</th><th>任务</th><th>轮次</th><th>得分</th><th>用时</th><th>记录时间</th><th></th>
+                </tr></thead>
                 <tbody>${records.map((r) => {
-                    const task = taskMap[r.taskId];
-                    const name = task ? task.name : r.taskId;
-                    const sub = r.submittedAt ? new Date(r.submittedAt).toLocaleString('zh-CN') : (r.date || '-');
+                    const sub = r.submittedAt ? new Date(r.submittedAt).toLocaleString('zh-CN') : '—';
+                    const action = r.editable
+                        ? `<button class="btn btn-sm btn-outline" data-edit="${Shared.escapeHtml(r.recordId)}">✎ 修改</button>`
+                        : '';
                     return `<tr>
                         <td>${Shared.escapeHtml(r.date || '-')}</td>
-                        <td>${Shared.escapeHtml(name)}</td>
-                        <td>${r.round || 1}</td>
+                        <td>${Shared.escapeHtml(r.trainingName)}</td>
+                        <td>${this.renderMockBadge(r.competitionType)} ${Shared.escapeHtml(r.mockName)}</td>
+                        <td>${Shared.escapeHtml(r.taskName)}</td>
+                        <td style="color:var(--gray-500);">${Shared.escapeHtml(r.roundLabel)}</td>
                         <td><strong>${r.score}</strong></td>
-                        <td>${r.time != null ? r.time.toFixed(2) + 's' : '-'}</td>
+                        <td>${r.time != null ? Number(r.time).toFixed(2) + 's' : '-'}</td>
                         <td style="color:var(--gray-400);font-size:0.78rem;">${Shared.escapeHtml(sub)}</td>
-                        <td><button class="btn btn-sm btn-outline" data-edit="${r.id}">✎ 修改</button></td>
+                        <td>${action}</td>
                     </tr>`;
                 }).join('')}</tbody>
             </table>`;
@@ -384,17 +520,25 @@
             });
         },
 
-        // ============ 编辑练习记录（保留 submittedAt） ============
+        // ============ 编辑自主训练记录（保留 submittedAt，跨集训查找） ============
+        findPracticeRecord(prId) {
+            const D = Shared.data;
+            for (const training of (D.trainings || [])) {
+                const record = (training.practiceRecords || []).find((r) => r.id === prId);
+                if (record) return { training, record };
+            }
+            return null;
+        },
+
         openEditPractice(prId) {
-            const training = this.getCurrentTraining();
-            if (!training || !training.practiceRecords) return;
-            const record = training.practiceRecords.find((r) => r.id === prId);
-            if (!record) return;
+            const found = this.findPracticeRecord(prId);
+            if (!found) return;
+            const { training, record } = found;
             this._editingPracticeId = prId;
             const taskMap = {};
             (Shared.data.tasks || []).forEach((t) => { taskMap[t.id] = t; });
             document.getElementById('editPracticeMeta').textContent =
-                `${Shared.escapeHtml(taskMap[record.taskId] ? taskMap[record.taskId].name : record.taskId)} · ${record.date || ''} · 第${record.round || 1}轮`;
+                `${Shared.escapeHtml(training.name || '（未命名集训）')} · ${Shared.escapeHtml(taskMap[record.taskId] ? taskMap[record.taskId].name : record.taskId)} · ${record.date || ''} · 第${record.round || 1}轮`;
             document.getElementById('editPracticeScoreInput').value = record.score;
             document.getElementById('editPracticeTimeInput').value = record.time != null ? record.time : '';
             document.getElementById('editPracticeSubmitted').textContent =
@@ -410,10 +554,9 @@
         confirmEditPractice() {
             const id = this._editingPracticeId;
             if (!id) return;
-            const training = this.getCurrentTraining();
-            if (!training || !training.practiceRecords) return;
-            const record = training.practiceRecords.find((r) => r.id === id);
-            if (!record) return;
+            const found = this.findPracticeRecord(id);
+            if (!found) return;
+            const { record } = found;
             const scoreStr = document.getElementById('editPracticeScoreInput').value.trim();
             const timeStr = document.getElementById('editPracticeTimeInput').value.trim();
             const score = parseFloat(scoreStr);
@@ -429,32 +572,31 @@
             this.renderCard(this.selectedStudentId, this.source);
         },
 
-        // ============ 导出 ============
+        // ============ 导出（导出当前筛选的训练成绩记录） ============
         exportPractice() {
             const studentId = this.selectedStudentId;
             if (!studentId) { this.toast('请先选择学员', 'warning'); return; }
             const student = (Shared.data.students || []).find((s) => s.id === studentId);
-            const records = this.getAllPracticeRecords(studentId);
-            if (records.length === 0) { this.toast('该学员暂无练习记录', 'warning'); return; }
-            const taskMap = {};
-            (Shared.data.tasks || []).forEach((t) => { taskMap[t.id] = t; });
+            this.populateRecordFilters();
+            const records = this.getFilteredRecords();
+            if (records.length === 0) { this.toast('该学员暂无符合条件的成绩记录', 'warning'); return; }
 
             const BOM = '\uFEFF';
             const escape = (v) => {
                 const s = String(v ?? '');
                 return /[,"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
             };
-            const header = ['数据类型', '得分', '用时(秒)', '记录时间'];
+            const header = ['集训', '赛项', '类型', '日期', '任务', '得分', '用时(秒)', '记录时间'];
             const rows = [header.map(escape).join(',')];
             records.forEach((r) => {
-                const task = taskMap[r.taskId];
-                const typeLabel = (task && task.type === 'challenge') ? '挑战类' : '基本功';
+                const typeText = r.competitionType === 'practice' ? '自主训练'
+                    : (r.competitionType === 'official' ? '正赛' : '模拟赛');
                 const score = r.score !== undefined && r.score !== null ? r.score : '';
                 const time = r.time != null ? r.time : '';
                 const submitted = r.submittedAt
                     ? new Date(r.submittedAt).toLocaleString('zh-CN')
                     : (r.date || '');
-                rows.push([typeLabel, score, time, submitted].map(escape).join(','));
+                rows.push([r.trainingName, r.mockName, typeText, r.date, r.taskName, score, time, submitted].map(escape).join(','));
             });
 
             const csv = BOM + rows.join('\n');
@@ -462,11 +604,11 @@
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `练习记录_${student ? student.name : studentId}.csv`;
+            a.download = `训练成绩记录_${student ? student.name : studentId}.csv`;
             document.body.appendChild(a);
             a.click();
             setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 200);
-            this.toast('已导出练习记录');
+            this.toast('已导出训练成绩记录');
         },
 
         // ============ 导入 ============
@@ -579,17 +721,6 @@
                 this.toast(`成功导入 ${success} 条练习记录`);
                 setTimeout(() => this.closeImportPractice(), 1200);
             }
-        },
-
-        // 汇总所有集训中某学员的练习记录
-        getAllPracticeRecords(studentId) {
-            const all = [];
-            (Shared.data.trainings || []).forEach((t) => {
-                (t.practiceRecords || []).forEach((r) => {
-                    if (r.studentId === studentId) all.push(r);
-                });
-            });
-            return all;
         },
 
         toast(msg, type) {

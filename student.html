@@ -16,6 +16,7 @@
             <div class="card-header">
                 <span class="card-title">👤 个人成绩卡</span>
                 <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                    <button class="btn btn-sm btn-outline" id="importSelfTrainingBtn" title="导入自主训练记录 CSV（stu_tool 导出格式），缺失信息手动补充">📥 导入自主训练</button>
                     <div class="view-toggle" id="sourceToggle" style="display:none;">
                         <button class="view-btn" data-source="competition">🏆 模拟练习</button>
                         <button class="view-btn" data-source="practice">🎯 自主训练</button>
@@ -31,34 +32,28 @@
             </div>
         </div>
 
-        <!-- ===== 自主训练录入 ===== -->
-        <div class="card" id="practiceEntryCard" style="display:none;">
-            <div class="card-header">
-                <span class="card-title">🎯 自主训练录入</span>
-                <span class="card-subtitle" id="practiceEntryTrainingName"></span>
-            </div>
-            <div class="form-row">
-                <select id="practiceTaskSelect" aria-label="选择任务" style="min-width:140px;">
-                    <option value="">— 选择任务 —</option>
-                </select>
-                <input type="number" id="practiceScoreInput" placeholder="得分" min="0" step="1" style="width:90px;padding:0.5rem 0.6rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.9rem;text-align:center;appearance:textfield;-moz-appearance:textfield;" />
-                <input type="number" id="practiceTimeInput" placeholder="用时(秒)" min="0" step="0.001" style="width:110px;padding:0.5rem 0.6rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.9rem;text-align:center;appearance:textfield;-moz-appearance:textfield;" />
-                <button class="btn btn-primary" id="practiceSubmitBtn">📝 提交记录</button>
-            </div>
-            <div class="form-note" id="practiceEntryNote" style="font-size:0.78rem;color:var(--gray-400);margin-top:0.5rem;">
-                提交时自动记录时间；修改已提交的成绩不会改变原提交时间。
-            </div>
-        </div>
-
-        <!-- ===== 练习记录列表 ===== -->
+        <!-- ===== 训练成绩记录表 ===== -->
         <div class="card" id="practiceListCard" style="display:none;">
             <div class="card-header">
-                <span class="card-title">📋 我的练习记录</span>
+                <span class="card-title">📊 训练成绩记录表</span>
                 <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
                     <span class="card-subtitle" id="practiceListCount"></span>
-                    <button class="btn btn-sm btn-outline" id="exportPracticeBtn" title="导出当前学员的练习记录（数据类型/得分/用时/记录时间）">📤 导出</button>
-                    <button class="btn btn-sm btn-outline" id="importPracticeBtn" title="导入练习记录 CSV，缺失信息手动补充">📥 导入</button>
+                    <button class="btn btn-sm btn-outline" id="exportPracticeBtn" title="导出当前筛选的训练成绩记录（集训/赛项/任务/得分/用时/时间）">📤 导出</button>
+                    <button class="btn btn-sm btn-outline" id="importPracticeBtn" title="导入自主训练记录 CSV（stu_tool 导出格式），缺失信息手动补充">📥 导入</button>
                 </div>
+            </div>
+            <div class="form-row" id="recordFilterBar" style="padding:0.25rem 1rem 0.75rem;gap:0.4rem;">
+                <label style="font-size:0.8rem;color:var(--gray-600);white-space:nowrap;">🔍 筛选</label>
+                <select id="recordTrainingFilter" aria-label="按集训筛选" style="min-width:130px;padding:0.3rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;background:#fff;color:var(--gray-800);">
+                    <option value="">全部集训</option>
+                </select>
+                <select id="recordMockFilter" aria-label="按赛项筛选" style="min-width:150px;padding:0.3rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;background:#fff;color:var(--gray-800);">
+                    <option value="">全部赛项</option>
+                </select>
+                <select id="recordTaskFilter" aria-label="按任务筛选" style="min-width:150px;padding:0.3rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;background:#fff;color:var(--gray-800);">
+                    <option value="">全部任务</option>
+                </select>
+                <button class="btn btn-sm btn-outline" id="recordFilterReset" title="重置全部筛选">⟲ 重置</button>
             </div>
             <div id="practiceListContent">
                 <!-- Rendered by JS -->
@@ -66,10 +61,10 @@
         </div>
     </div>
 
-    <!-- ========== Modal: 导入练习记录 ========== -->
+    <!-- ========== Modal: 导入自主训练 ========== -->
     <div class="modal-overlay" id="importPracticeModal">
         <div class="modal-box">
-            <h3>📥 导入练习记录</h3>
+            <h3>📥 导入自主训练</h3>
             <div class="form-group">
                 <label>目标集训</label>
                 <select id="importTrainingSelect" aria-label="选择目标集训" style="width:100%;padding:0.5rem 0.85rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.9rem;background:#fff;color:var(--gray-800);"></select>

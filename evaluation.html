@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>评估管理 - MakeX Inspire 成绩统计系统</title>
+    <link rel="stylesheet" href="style.css" />
+    <style>
+        /* ===== 评估报告：压缩嵌套卡片间距，节省横向空间 ===== */
+        #evalContent .card {
+            padding: 1rem 0.75rem;
+            margin-top: 0.75rem;
+            margin-bottom: 0;
+            box-shadow: none;
+        }
+        #evalContent .card .card-header {
+            margin-bottom: 0.6rem;
+        }
+        /* 报告标题与学员信息行 */
+        .report-title {
+            text-align: center;
+            font-size: 1.12rem;
+            font-weight: 700;
+            color: var(--gray-800);
+        }
+        .report-meta {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 0.3rem 1rem;
+            margin-top: 0.25rem;
+            font-size: 0.76rem;
+            color: var(--gray-600);
+        }
+        /* ===== 页面工具条（始终可见，独立于文档卡片） ===== */
+        .page-toolbar {
+            max-width: 794px;
+            margin: 0 auto 0.75rem;
+            padding: 0.6rem 0.9rem 0.7rem;
+            background: #f8fafc;
+            border: 1px solid var(--gray-100);
+            border-radius: var(--radius);
+        }
+        .page-toolbar-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.6rem;
+            flex-wrap: wrap;
+        }
+        .page-toolbar-title {
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: var(--gray-800);
+        }
+        /* ===== 导出预览（同窗口）：隐藏文档内编辑控件，接近 PDF 呈现 ===== */
+        body.preview-mode #evalContent button { display: none !important; }
+        body.preview-mode .coach-editor-col { display: none !important; }
+        body.preview-mode .quant-score {
+            border: none !important;
+            background: transparent !important;
+            -webkit-appearance: none !important;
+            -moz-appearance: textfield !important;
+            appearance: none !important;
+            padding: 0 !important;
+            font-size: inherit !important;
+            width: auto !important;
+            text-align: center !important;
+        }
+        body.preview-mode #quantTableContainer > div,
+        body.preview-mode #quantSummaryBody [style*="overflow-x"] { overflow: visible !important; }
+        body.preview-mode #coachFinalBody { border-left: 3px solid var(--primary); padding-left: 0.75rem; }
+        /* 填写模式隐藏只读区块（参赛记录 / 量化评估（综合）），预览与导出时显示 */
+        @media screen {
+            body:not(.preview-mode) .report-preview-only { display: none; }
+        }
+        /* 仅填写模式显示的编辑控件（量化结构模板等）；导出预览与 PDF 隐藏 */
+        @media screen {
+            body.preview-mode .report-edit-only { display: none !important; }
+        }
+        @media print {
+            .report-edit-only { display: none !important; }
+        }
+        /* ===== 打印 / 导出 PDF ===== */
+        @media print {
+            @page { size: A4; margin: 10mm; }
+            * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+            body { background: #fff !important; }
+            /* 隐藏站点外壳与工具栏 */
+            .site-notice, header, .sidebar, .sidebar-overlay, .sidebar-toggle, .site-footer,
+            .toast-container, .modal-overlay { display: none !important; }
+            /* 解除滚动容器的裁剪 */
+            .main-content { max-height: none !important; overflow: visible !important; padding: 0 !important; }
+            .layout { display: block !important; max-width: none !important; margin: 0 !important; }
+            .container { max-width: none !important; margin: 0 !important; padding: 0 !important; }
+            /* 外层报告卡：占满 A4，无卡片感 */
+            .container > .card { max-width: none !important; margin: 0 !important; padding: 0 !important; box-shadow: none !important; border: none !important; }
+            /* 隐藏页面工具条、编辑栏与文档内按钮 */
+            .page-toolbar, .coach-editor-col, #evalContent button { display: none !important; }
+            /* 报告内各节：紧凑、无阴影边框 */
+            #evalContent .card { margin: 0 0 1rem !important; padding: 0 !important; box-shadow: none !important; border: none !important; }
+            #evalContent .card .card-header { margin-bottom: 0.6rem; }
+            /* 量化评分输入框转纯文本 */
+            .quant-score {
+                border: none !important;
+                background: transparent !important;
+                -webkit-appearance: none !important;
+                -moz-appearance: textfield !important;
+                appearance: none !important;
+                padding: 0 !important;
+                font-size: inherit !important;
+                width: auto !important;
+                text-align: center !important;
+            }
+            /* 填写模式的「评价细则 / 参考评分」输入在 PDF 中同样转纯文本（与预览一致） */
+            .quant-crit-text, .quant-ref {
+                border: none !important;
+                background: transparent !important;
+                -webkit-appearance: none !important;
+                -moz-appearance: textfield !important;
+                appearance: none !important;
+                box-shadow: none !important;
+                padding: 0.2rem 0.1rem !important;
+                font-size: inherit !important;
+                font-weight: inherit !important;
+                color: inherit !important;
+                width: auto !important;
+                min-width: 0 !important;
+            }
+            .quant-crit-text { text-align: left !important; }
+            .quant-ref { text-align: center !important; }
+            /* 删除操作列（仅填写模式存在）：PDF 中整列不呈现 */
+            #quantTableContainer .quant-op-col { display: none !important; }
+            /* 填写模式的 维度颜色选择器 等编辑控件在 PDF 中隐藏（名称/文字保留为竖排文本） */
+            #quantTableContainer .quant-dim-color,
+            #quantTableContainer .quant-add-sub,
+            #quantTableContainer .quant-del-dim,
+            #quantTableContainer .quant-del-sub { display: none !important; }
+            #quantTableContainer .quant-dim-edit,
+            #quantTableContainer .quant-sub-edit { outline: none !important; }
+            /* 填写模式直打 PDF 时：把 维度/子维度 列压回与预览一致的窄竖排，并去掉编辑态高度约束 */
+            #quantTableContainer td.qdim { width: 27px !important; min-width: 27px !important; max-width: 27px !important; }
+            #quantTableContainer td.qsub { width: 28px !important; min-width: 28px !important; max-width: 28px !important; }
+            #quantTableContainer .quant-dim-edit,
+            #quantTableContainer .quant-sub-edit { min-height: 0 !important; max-height: none !important; }
+            /* 解除横向滚动容器的裁剪，避免被页边截断 */
+            #quantTableContainer > div, #quantSummaryBody [style*="overflow-x"] { overflow: visible !important; }
+            /* 表格 / 雷达 / 区块尽量不跨页断行 */
+            .student-card-header, .overview-sec-title, #quantSummaryBody canvas,
+            #taskCharts .task-chart-card, #quantTableContainer .quant-dim-name,
+            #quantTableContainer tfoot, #quantTableContainer thead { break-inside: avoid; page-break-inside: avoid; }
+            .quant-table { break-inside: auto; }
+            /* ===== 导出 PDF：三大模块各自从新一页开始 ===== */
+            /* 模块一（综合预览）紧跟报告标题位于第 1 页首页；模块二/三强制另起新页，内部允许自动分页 */
+            #evalContent > .card[data-module] { break-before: page; page-break-before: always; }
+            #evalContent > .card[data-module="1"] { break-before: auto; page-break-before: auto; }
+            /* 模块一尽量单页：压缩各小节垂直间距 */
+            #evalContent > .card[data-module="1"] > div {
+                margin-top: 0.4rem !important;
+                padding-top: 0.4rem !important;
+            }
+            #evalContent > .card[data-module="1"] > div:first-child {
+                margin-top: 0 !important;
+                padding-top: 0 !important;
+            }
+            a { text-decoration: none; color: inherit; }
+            /* 教练评语：引文式排版 */
+            #coachFinalBody { border-left: 3px solid var(--primary); padding-left: 0.75rem; margin-top: 0.5rem; }
+        }
+        /* ===== 导出 PDF / 预览水印 ===== */
+        #reportWatermark {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            pointer-events: none;
+            z-index: 9990;
+            display: none;
+        }
+        #reportWatermark .wm-tile {
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        /* 水印仅在导出 PDF（打印）时展示；导出预览（屏幕）不显示 */
+        @media print {
+            #reportWatermark { display: block !important; }
+        }
+    </style>
+</head>
+<body>
+    <script src="shared.js"></script>
+    <script src="shared_indexdb.js"></script>
+    <script src="header.js"></script>
+
+    <div class="container">
+        <!-- ===== 评估管理：训练评估报告（按 A4 宽度设计） ===== -->
+        <div class="page-toolbar">
+            <div class="page-toolbar-head">
+                <span class="page-toolbar-title">📝 训练评估报告</span>
+                <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                    <div class="view-toggle" id="evalViewToggle">
+                        <button type="button" class="view-btn active" data-view="edit" title="教练填写信息（评分、评语、元素等）">✍️ 填写</button>
+                        <button type="button" class="view-btn" data-view="preview" title="同窗口预览导出效果（同 PDF 呈现）">👁 导出预览</button>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline" id="evalHeaderEditBtn" title="编辑报告页面元素（标题、学员信息等）">🧩 编辑元素</button>
+                    <button class="btn btn-sm btn-primary" id="evalGenerateBtn">🔄 生成评估</button>
+                    <button type="button" class="btn btn-sm btn-outline" id="evalPrintBtn" title="导出为 PDF（浏览器打印，可另存为 PDF）">🖨 导出 PDF</button>
+                </div>
+            </div>
+            <div class="form-row" id="evalToolbar" style="padding:0.5rem 0 0;gap:0.4rem;align-items:center;margin-top:0.4rem;border-top:1px solid var(--gray-100);">
+                <span style="font-size:0.8rem;color:var(--gray-600);white-space:nowrap;font-weight:600;">👥 学员</span>
+                <select id="evalClassSelect" aria-label="选择班级" style="min-width:110px;padding:0.3rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;background:#fff;color:var(--gray-800);">
+                    <option value="">全部班级</option>
+                </select>
+                <select id="evalStudentSelect" aria-label="选择学员" style="min-width:140px;padding:0.3rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;background:#fff;color:var(--gray-800);">
+                    <option value="">— 请选择学员 —</option>
+                </select>
+                <span style="font-size:0.8rem;color:var(--gray-600);white-space:nowrap;font-weight:600;">📋 评估范围</span>
+                <button type="button" class="btn btn-sm btn-outline" id="scopeTrigger" title="点击选择评估范围（集训 / 赛事，多选）">📋 评估范围：全部</button>
+            </div>
+        </div>
+        <div class="card" style="max-width:794px;margin:0 auto;padding:0.75rem 0.75rem 1.25rem;">
+            <div id="evalContent">
+                <!-- Rendered by JS -->
+                <div class="empty-state"><div class="icon">👆</div><p>请选择学员与集训，生成评估报告</p></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== 导出 PDF / 预览水印层（position:fixed，打印时每页自动重复） ===== -->
+    <div id="reportWatermark" aria-hidden="true"></div>
+
+    <!-- ========== Modal: 选择评估范围 ========== -->
+    <div class="modal-overlay" id="scopeModal">
+        <div class="modal-box">
+            <h3>🎯 选择评估范围</h3>
+            <div class="form-group">
+                <label>集训（多选）</label>
+                <div style="display:flex;gap:0.4rem;margin-bottom:0.3rem;">
+                    <button type="button" class="btn btn-sm btn-outline" id="scopeTrainingAll">全选集训</button>
+                    <button type="button" class="btn btn-sm btn-outline" id="scopeTrainingNone">清空集训</button>
+                </div>
+                <div class="checkbox-grid" id="scopeTrainingList"></div>
+            </div>
+            <div class="form-group">
+                <label>赛事 / 数据集（多选）</label>
+                <div style="display:flex;gap:0.4rem;margin-bottom:0.3rem;">
+                    <button type="button" class="btn btn-sm btn-outline" id="scopeDataAll">全选赛项</button>
+                    <button type="button" class="btn btn-sm btn-outline" id="scopeDataNone">清空赛项</button>
+                </div>
+                <div class="checkbox-grid" id="scopeDataList"></div>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-outline" id="scopeCancel">取消</button>
+                <button type="button" class="btn btn-primary" id="scopeConfirm">✅ 确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Modal: 编辑报告元素 ========== -->
+    <div class="modal-overlay" id="reportHeaderModal">
+        <div class="modal-box">
+            <h3>🧩 编辑报告元素</h3>
+            <div class="form-group">
+                <label>页面标题</label>
+                <input type="text" id="reportHeaderTitle" placeholder="如：训练评估报告" />
+            </div>
+            <div class="form-group">
+                <label>教练</label>
+                <input type="text" id="reportHeaderCoach" placeholder="如：Brook" />
+            </div>
+            <div class="form-group">
+                <label>报告填写日期</label>
+                <input type="text" id="reportHeaderDate" placeholder="如：2026/2/25" />
+            </div>
+            <div class="form-group">
+                <label>教练评语 AI 要求提示词（用于 ✨ AI 生成，可自由修改，会随数据包一起发送/复制）</label>
+                <textarea id="reportHeaderAIPrompt" rows="5" style="width:100%;padding:0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;line-height:1.6;font-family:inherit;resize:vertical;box-sizing:border-box;" placeholder="在此输入 AI 撰写评语的要求…"></textarea>
+            </div>
+            <div class="form-group">
+                <label>AI 数据说明（描述发给 AI 的数据结构，帮助 AI 理解字段含义；可修改，随数据包一起发送/复制）</label>
+                <textarea id="reportHeaderAIDataNote" rows="5" style="width:100%;padding:0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;line-height:1.6;font-family:inherit;resize:vertical;box-sizing:border-box;" placeholder="在此描述发给 AI 的评估数据结构…"></textarea>
+            </div>
+            <div class="form-group" style="border-top:1px dashed var(--gray-200);padding-top:0.7rem;margin-top:0.4rem;">
+                <label>🖨️ 导出 PDF 水印（预览 / 打印 / PDF 每页自动填充）</label>
+                <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap;margin-bottom:0.4rem;">
+                    <span style="font-size:0.8rem;color:var(--gray-500);white-space:nowrap;">模板</span>
+                    <select id="wmTemplate" title="选择已保存的水印模板（由你保存）" style="flex:1;min-width:150px;">
+                        <option value="">（自定义）</option>
+                    </select>
+                    <button type="button" class="btn btn-sm btn-outline" id="wmTemplateSave" title="把当前水印设置保存为一个可复用的模板">💾 存为模板</button>
+                    <button type="button" class="btn btn-sm btn-outline" id="wmTemplateDel" style="display:none;" title="删除当前选中的模板">🗑 删除</button>
+                    <label style="display:flex;align-items:center;gap:0.3rem;font-weight:500;font-size:0.8rem;margin:0;white-space:nowrap;">
+                        <input type="checkbox" id="wmEnabled" checked style="margin:0;" /> 启用
+                    </label>
+                </div>
+                <div id="wmTemplateSaveRow" style="display:none;align-items:center;gap:0.4rem;flex-wrap:wrap;margin-bottom:0.4rem;">
+                    <input type="text" id="wmTemplateNewName" placeholder="模板名称，如：家长版 / 内部资料 / 正式…" style="flex:1;min-width:160px;padding:0.3rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;" />
+                    <button type="button" class="btn btn-sm btn-primary" id="wmTemplateSaveConfirm">✔ 保存</button>
+                    <button type="button" class="btn btn-sm btn-outline" id="wmTemplateSaveCancel">取消</button>
+                </div>
+                <textarea id="wmText" rows="2" style="width:100%;padding:0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.85rem;line-height:1.6;font-family:inherit;resize:vertical;box-sizing:border-box;" placeholder="水印文字，可多行；留空则无水印。如：内部资料 / 请勿外传…"></textarea>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:0.4rem 0.8rem;margin-top:0.5rem;align-items:end;">
+                    <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;">透明度 %<input type="number" id="wmOpacity" min="0" max="100" step="1" value="10" /></label>
+                    <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;">倾斜角度 °<input type="number" id="wmAngle" min="-360" max="360" step="1" value="45" /></label>
+                    <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;">字号 px<input type="number" id="wmFontSize" min="10" max="200" step="1" value="28" /></label>
+                    <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;">颜色<select id="wmColor">
+                            <option value="#64748b">浅灰</option>
+                            <option value="#334155">深灰</option>
+                            <option value="#2563eb">蓝</option>
+                            <option value="#dc2626">红</option>
+                            <option value="#16a34a">绿</option>
+                        </select></label>
+                    <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;" title="自动按角度+字号计算平铺间距，≥1 即不会重叠；越小越密">间距倍数<input type="number" id="wmDensity" min="0.6" max="4" step="0.1" value="1.2" /></label>
+                </div>
+                <div style="margin-top:0.35rem;font-size:0.72rem;color:var(--gray-400);line-height:1.6;">💡 系统不内置默认模板：调好文字 / 透明度 / 角度等后点「💾 存为模板」即可保存复用，下拉可套用或删除（仅存本机浏览器）。间距倍数会自动按文字长度与倾斜角度计算平铺密度，避免文字重叠。</div>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-outline" id="reportHeaderCancel">取消</button>
+                <button type="button" class="btn btn-primary" id="reportHeaderSave">✅ 保存并刷新</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Modal: 新增子维度（选择父维度） ========== -->
+    <div class="modal-overlay" id="quantAddSubModal">
+        <div class="modal-box">
+            <h3>➕ 新增子维度</h3>
+            <div class="form-group">
+                <label>选择所属维度</label>
+                <div class="checkbox-grid" id="quantAddSubDimList"></div>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-outline" id="quantAddSubCancel">取消</button>
+                <button type="button" class="btn btn-primary" id="quantAddSubConfirm">✅ 确定新增</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Modal: AI 生成教练评语 ========== -->
+    <div class="modal-overlay" id="aiCommentModal">
+        <div class="modal-box" style="max-width:720px;">
+            <h3>✨ AI 生成教练评语</h3>
+            <div class="form-group">
+                <label>AI 接口配置（OpenAI 兼容）</label>
+                <div style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center;">
+                    <select id="aiProvider" style="padding:0.35rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;background:#fff;color:var(--gray-800);">
+                        <option value="">自定义</option>
+                        <option value="openai">OpenAI</option>
+                        <option value="deepseek">DeepSeek</option>
+                        <option value="moonshot">Moonshot（Kimi）</option>
+                        <option value="ollama">Ollama 本地（免 Key）</option>
+                    </select>
+                    <input type="text" id="aiBaseUrl" placeholder="接口地址" style="flex:2;min-width:180px;padding:0.35rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;" />
+                    <input type="password" id="aiApiKey" placeholder="API 密钥（可留空）" style="flex:2;min-width:150px;padding:0.35rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;" />
+                    <input type="text" id="aiModel" placeholder="模型" style="flex:1;min-width:110px;padding:0.35rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;" />
+                    <button type="button" class="btn btn-sm btn-outline" id="aiConfigSaveBtn">💾 保存配置</button>
+                </div>
+                <div style="margin-top:0.4rem;font-size:0.75rem;color:var(--gray-500);line-height:1.7;">
+                    💡 密钥仅保存在本机浏览器，不会上传（本系统无服务器）。<b>不想折腾 Key？</b>选「Ollama 本地」在本机装好 Ollama 即可免密钥调用；或点下方「🔗 复制数据包」粘贴到任意 AI 生成后，再把回复粘贴回来解析。
+                </div>
+            </div>
+            <div class="form-group">
+                <label>发送给 AI 的数据（可复制到任意 AI 工具）</label>
+                <textarea id="aiDataPackage" readonly style="width:100%;min-height:130px;padding:0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.78rem;line-height:1.5;font-family:inherit;resize:vertical;box-sizing:border-box;background:#f8fafc;"></textarea>
+                <div style="display:flex;gap:0.5rem;margin-top:0.4rem;flex-wrap:wrap;">
+                    <button type="button" class="btn btn-sm btn-outline" id="aiCopyBtn">🔗 复制数据包</button>
+                    <button type="button" class="btn btn-sm btn-primary" id="aiGenerateBtn">🚀 调用 AI 生成</button>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>AI 生成结果（点击「选用」写入教练评语）</label>
+                <div id="aiDrafts" style="display:flex;flex-direction:column;gap:0.5rem;max-height:240px;overflow:auto;"></div>
+            </div>
+            <div class="form-group">
+                <label>手动粘贴 AI 回复（带【版本N】或编号，可自行导入）</label>
+                <textarea id="aiPasteInput" placeholder="把任意 AI 生成的多个版本粘贴到这里…" style="width:100%;min-height:80px;padding:0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.78rem;line-height:1.5;font-family:inherit;resize:vertical;box-sizing:border-box;"></textarea>
+                <div style="display:flex;gap:0.5rem;margin-top:0.4rem;">
+                    <button type="button" class="btn btn-sm btn-outline" id="aiPasteParseBtn">📋 解析并展示</button>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-outline" id="aiCommentCancel">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Toast Container ========== -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script src="evaluation.js"></script>
+</body>
+</html>

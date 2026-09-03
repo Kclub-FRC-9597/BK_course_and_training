@@ -12,25 +12,18 @@
     <script src="header.js"></script>
 
     <div class="container">
-        <!-- ====== 新增班级 ====== -->
-        <div class="card">
-            <div class="card-header">
-                <span class="card-title">🏫 新增班级</span>
+        <!-- ====== 操作栏（新增班级 / 新增学员 / 数据备份） ====== -->
+        <div class="card" id="sec-backup" style="margin-bottom:1rem;">
+            <div class="card-header" style="margin-bottom:0;">
+                <span class="card-title">⚙️ 教务操作</span>
+                <span style="font-size:0.82rem;font-weight:400;color:var(--gray-500);">新增班级 / 新增学员 · 数据备份 / 跨设备同步</span>
             </div>
-            <div class="form-row">
-                <input type="text" id="groupNameInput" class="input-full" placeholder="输入班级名称" maxlength="20" autocomplete="off" />
-                <button class="btn btn-primary" id="addGroupBtn">➕ 添加班级</button>
-            </div>
-        </div>
-
-        <!-- ====== 新增学员 ====== -->
-        <div class="card">
-            <div class="card-header">
-                <span class="card-title">👤 新增学员</span>
-            </div>
-            <div class="form-row">
-                <input type="text" id="studentNameInput" class="input-full" placeholder="输入学员姓名" maxlength="20" autocomplete="off" />
-                <button class="btn btn-primary" id="addStudentBtn">➕ 添加学员</button>
+            <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;padding-top:0.25rem;">
+                <button class="btn btn-primary btn-sm" id="openAddGroupBtn">🏫 新增班级</button>
+                <button class="btn btn-primary btn-sm" id="openAddStudentBtn">👤 新增学员</button>
+                <button class="btn btn-outline btn-sm" id="exportDataBtn">⬇️ 导出全部数据</button>
+                <button class="btn btn-outline btn-sm" id="importDataBtn">⬆️ 导入数据</button>
+                <input type="file" id="importFileInput" accept=".json,application/json" style="display:none;" />
             </div>
         </div>
 
@@ -45,6 +38,36 @@
             </div>
             <div id="studentList" class="student-list">
                 <!-- Rendered by JS -->
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Modal: 新增班级 ========== -->
+    <div class="modal-overlay" id="addGroupModal">
+        <div class="modal-box" style="max-width:400px;">
+            <h3>🏫 新增班级</h3>
+            <div class="form-group">
+                <label>班级名称</label>
+                <input type="text" id="addGroupNameInput" class="input-full" maxlength="20" autocomplete="off" />
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-outline" id="addGroupModalCancel">取消</button>
+                <button class="btn btn-primary" id="addGroupModalConfirm">确认添加</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Modal: 新增学员 ========== -->
+    <div class="modal-overlay" id="addStudentModal">
+        <div class="modal-box" style="max-width:400px;">
+            <h3>👤 新增学员</h3>
+            <div class="form-group">
+                <label>学员姓名</label>
+                <input type="text" id="addStudentNameInput" class="input-full" maxlength="20" autocomplete="off" />
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-outline" id="addStudentModalCancel">取消</button>
+                <button class="btn btn-primary" id="addStudentModalConfirm">确认添加</button>
             </div>
         </div>
     </div>
@@ -70,6 +93,30 @@
         </div>
     </div>
 
+    <!-- ========== Modal: 导入数据 ========== -->
+    <div class="modal-overlay" id="importModal">
+        <div class="modal-box" style="max-width:480px;">
+            <h3>⬆️ 导入数据</h3>
+            <div id="importPreviewInfo" style="font-size:0.85rem;color:var(--gray-600);margin-bottom:0.5rem;white-space:pre-wrap;line-height:1.6;"></div>
+            <div id="importKeyList" style="max-height:160px;overflow-y:auto;font-size:0.8rem;background:#f8fafc;padding:0.5rem 0.75rem;border-radius:6px;font-family:monospace;white-space:pre-wrap;line-height:1.6;margin-bottom:0.75rem;"></div>
+            <div class="form-group">
+                <label>导入方式</label>
+                <label style="display:inline-flex;align-items:center;gap:0.3rem;cursor:pointer;font-size:0.88rem;margin-right:1rem;">
+                    <input type="radio" name="importMode" value="overwrite" checked style="accent-color:var(--primary);">
+                    整体覆盖（先清空再写入）
+                </label>
+                <label style="display:inline-flex;align-items:center;gap:0.3rem;cursor:pointer;font-size:0.88rem;">
+                    <input type="radio" name="importMode" value="merge" style="accent-color:var(--primary);">
+                    合并写入（保留其他数据）
+                </label>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-outline" id="importModalCancel">取消</button>
+                <button class="btn btn-primary" id="importModalConfirm">确认导入</button>
+            </div>
+        </div>
+    </div>
+
     <!-- ========== Toast Container ========== -->
     <div class="toast-container" id="toastContainer"></div>
 
@@ -80,6 +127,7 @@
     // =================================================================
     const AdminApp = {
         _editStudentId: null,
+        _pendingImport: null,
 
         init() {
             Shared.loadData();
@@ -90,6 +138,91 @@
         generateId() { return Shared.generateId(); },
         toast(msg, type) { Shared.toast(msg, type); },
         escapeHtml(str) { return Shared.escapeHtml(str); },
+
+        // ============ 数据备份 / 跨设备同步 ============
+        // 导出 localStorage 全部键为 JSON 文件
+        exportAllData() {
+            try {
+                const keys = {};
+                let totalBytes = 0;
+                for (let i = 0; i < localStorage.length; i++) {
+                    const key = localStorage.key(i);
+                    const value = localStorage.getItem(key);
+                    keys[key] = value;
+                    totalBytes += (key.length + (value ? value.length : 0)) * 2; // UTF-16 近似字节
+                }
+                const payload = {
+                    app: 'insTools',
+                    type: 'localstorage-backup',
+                    formatVersion: 1,
+                    exportedAt: new Date().toISOString(),
+                    keyCount: Object.keys(keys).length,
+                    keys,
+                };
+                const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `insTools_backup_${new Date().toISOString().slice(0, 10)}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                this.toast(`✅ 已导出 ${payload.keyCount} 个键，约 ${(totalBytes / 1024).toFixed(1)} KB`);
+            } catch (e) {
+                console.warn('exportAllData error:', e);
+                this.toast('导出失败', 'warning');
+            }
+        },
+
+        // 解析并预览导入文件
+        async handleImportFile(file) {
+            if (!file) return;
+            try {
+                const text = await file.text();
+                const payload = JSON.parse(text);
+                if (!payload || typeof payload !== 'object' || !payload.keys || typeof payload.keys !== 'object') {
+                    this.toast('文件格式不正确：缺少 keys 字段', 'warning');
+                    return;
+                }
+                this._pendingImport = payload;
+                const keyNames = Object.keys(payload.keys);
+                const totalBytes = keyNames.reduce((s, k) => s + (k.length + (payload.keys[k] ? payload.keys[k].length : 0)) * 2, 0);
+                const timeStr = payload.exportedAt ? new Date(payload.exportedAt).toLocaleString() : '未知';
+                let info = `📄 ${file.name}\n导出时间：${timeStr}\n键数量：${keyNames.length}　数据量：${(totalBytes / 1024).toFixed(1)} KB`;
+                if (payload.keys.sts_storage_mode === 'idb') {
+                    info += '\n⚠️ 源设备处于 IndexedDB 模式，本次备份不含 STS_DB 数据；建议在源设备切回 localStorage 后重新导出';
+                }
+                document.getElementById('importPreviewInfo').textContent = info;
+                document.getElementById('importKeyList').textContent = keyNames.join('\n');
+                document.getElementById('importModal').classList.add('open');
+            } catch (e) {
+                console.warn('handleImportFile error:', e);
+                this.toast('导入文件解析失败：不是有效的 JSON', 'warning');
+            }
+        },
+
+        closeImportModal() {
+            document.getElementById('importModal').classList.remove('open');
+            this._pendingImport = null;
+        },
+
+        confirmImport() {
+            const payload = this._pendingImport;
+            if (!payload) return;
+            const mode = document.querySelector('input[name="importMode"]:checked').value;
+            try {
+                if (mode === 'overwrite') localStorage.clear();
+                Object.keys(payload.keys).forEach((k) => localStorage.setItem(k, payload.keys[k]));
+                Shared.loadData();
+                const modeLabel = mode === 'overwrite' ? '整体覆盖' : '合并写入';
+                this.toast(`✅ 已导入 ${Object.keys(payload.keys).length} 个键（${modeLabel}）`);
+                this.closeImportModal();
+            } catch (e) {
+                console.warn('confirmImport error:', e);
+                this.toast('导入写入失败', 'warning');
+            }
+        },
 
         // ============ Group Operations ============
         addGroup(name) {
@@ -210,24 +343,70 @@
 
         // ============ Events Binding ============
         bindEvents() {
-            document.getElementById('addGroupBtn').addEventListener('click', () => {
-                const input = document.getElementById('groupNameInput');
-                this.addGroup(input.value);
-                input.value = '';
-                input.focus();
+            // === 新增班级 / 新增学员（弹窗） ===
+            document.getElementById('openAddGroupBtn').addEventListener('click', () => {
+                document.getElementById('addGroupNameInput').value = '';
+                document.getElementById('addGroupModal').classList.add('open');
+                setTimeout(() => document.getElementById('addGroupNameInput').focus(), 100);
             });
-            document.getElementById('groupNameInput').addEventListener('keydown', (e) => {
-                if (e.key === 'Enter') document.getElementById('addGroupBtn').click();
+            document.getElementById('addGroupModalCancel').addEventListener('click', () => {
+                document.getElementById('addGroupModal').classList.remove('open');
             });
-            document.getElementById('addStudentBtn').addEventListener('click', () => {
-                const nameInput = document.getElementById('studentNameInput');
-                this.addStudent(nameInput.value);
-                nameInput.value = '';
-                nameInput.focus();
+            document.getElementById('addGroupModalConfirm').addEventListener('click', () => {
+                const input = document.getElementById('addGroupNameInput');
+                if (this.addGroup(input.value)) {
+                    input.value = '';
+                    document.getElementById('addGroupModal').classList.remove('open');
+                }
             });
-            document.getElementById('studentNameInput').addEventListener('keydown', (e) => {
-                if (e.key === 'Enter') document.getElementById('addStudentBtn').click();
+            document.getElementById('addGroupNameInput').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') document.getElementById('addGroupModalConfirm').click();
             });
+            document.getElementById('addGroupModal').addEventListener('click', (e) => {
+                if (e.target === e.currentTarget) document.getElementById('addGroupModal').classList.remove('open');
+            });
+
+            document.getElementById('openAddStudentBtn').addEventListener('click', () => {
+                document.getElementById('addStudentNameInput').value = '';
+                document.getElementById('addStudentModal').classList.add('open');
+                setTimeout(() => document.getElementById('addStudentNameInput').focus(), 100);
+            });
+            document.getElementById('addStudentModalCancel').addEventListener('click', () => {
+                document.getElementById('addStudentModal').classList.remove('open');
+            });
+            document.getElementById('addStudentModalConfirm').addEventListener('click', () => {
+                const input = document.getElementById('addStudentNameInput');
+                if (this.addStudent(input.value)) {
+                    input.value = '';
+                    document.getElementById('addStudentModal').classList.remove('open');
+                }
+            });
+            document.getElementById('addStudentNameInput').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') document.getElementById('addStudentModalConfirm').click();
+            });
+            document.getElementById('addStudentModal').addEventListener('click', (e) => {
+                if (e.target === e.currentTarget) document.getElementById('addStudentModal').classList.remove('open');
+            });
+
+            // === 数据备份 / 导入导出 ===
+            const exportBtn = document.getElementById('exportDataBtn');
+            if (exportBtn) exportBtn.addEventListener('click', () => this.exportAllData());
+            const importBtn = document.getElementById('importDataBtn');
+            if (importBtn) importBtn.addEventListener('click', () => document.getElementById('importFileInput').click());
+            const importFileInput = document.getElementById('importFileInput');
+            if (importFileInput) importFileInput.addEventListener('change', (e) => {
+                this.handleImportFile(e.target.files[0]);
+                e.target.value = '';
+            });
+            const importCancel = document.getElementById('importModalCancel');
+            if (importCancel) importCancel.addEventListener('click', () => this.closeImportModal());
+            const importConfirm = document.getElementById('importModalConfirm');
+            if (importConfirm) importConfirm.addEventListener('click', () => this.confirmImport());
+            const importModal = document.getElementById('importModal');
+            if (importModal) importModal.addEventListener('click', (e) => {
+                if (e.target === e.currentTarget) this.closeImportModal();
+            });
+
             // === 学员/班级操作 ===
             document.getElementById('editStudentModalCancel').addEventListener('click', () => this.closeEditStudentModal());
             document.getElementById('editStudentModalConfirm').addEventListener('click', () => this.confirmEditStudent());
