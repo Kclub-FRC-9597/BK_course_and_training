@@ -19,6 +19,7 @@
         _quantExitCb: null,
         _quantExitCancelCb: null,
         viewingArchiveId: null, // 正在查看的已出具报告存档 id（null = 处于当前报告）
+        _reportRendered: false, // #evalContent 里是否已有已渲染的报告内容（空内容不允许打开报告弹窗）
         _fillPlanId: null, // 当前进入填写的计划 id（用于退出时自动记填写进度）
         _fillSid: null, // 当前进入填写的学员 id
         _fillBase: null, // 进入填写时的数据快照（退出时对比判断“有改动”）
@@ -123,6 +124,10 @@
             this.updateScopeSummary();
             this.populateTemplateChoiceSelect(); // 报告级「量化模板」下拉（静态，模板可能已存于本地）
             this.renderPlanBoard(); // 评估计划 ToDo 看板
+            // 报告弹窗：页面初载确保关闭（它只在选中/已渲染学员报告时才打开）
+            const sheetEl = document.getElementById('reportSheet');
+            if (sheetEl) sheetEl.classList.remove('open');
+            document.body.classList.remove('report-sheet-lock');
             this.initUnsavedGuard(); // 未提交改动时离开页面给出提示
         },
 
@@ -496,6 +501,7 @@
             this.viewingArchiveId = id;
             const content = document.getElementById('evalContent');
             if (content) content.innerHTML = rec.html || '';
+            this._reportRendered = !!rec.html; // 存档快照为空时不打开报告弹窗
             const notice = document.getElementById('archiveViewNotice');
             const title = document.getElementById('archiveViewTitle');
             if (notice && title) {
@@ -2091,6 +2097,11 @@
         openReportSheet(subtitle) {
             const sheet = document.getElementById('reportSheet');
             if (!sheet) return;
+            // 防御：只有在真的有已渲染的报告内容时才打开（避免出现空的「训练评估报告」面板）
+            if (!this._reportRendered) {
+                this.toast('请先从「📋 评估计划」选择学员，再查看评估报告', 'warning');
+                return;
+            }
             const sub = document.getElementById('reportSheetSub');
             if (sub) sub.textContent = subtitle || '';
             sheet.classList.add('open');
@@ -2102,6 +2113,7 @@
             const sheet = document.getElementById('reportSheet');
             if (sheet) sheet.classList.remove('open');
             document.body.classList.remove('report-sheet-lock');
+            this._reportRendered = false; // 关闭后内容不再保证有效，下次需重新渲染方可打开
             // 若正在查看历史报告，一并退出查看态
             if (this.viewingArchiveId) {
                 this.viewingArchiveId = null;
@@ -2365,6 +2377,7 @@
             const trainings = this.getSelectedTrainings();
             if (trainings.length === 0) { this.showEmpty('暂无可用评估数据（未找到任何集训 / 赛事数据）'); return; }
             const r = this.collectStudentAssessment(student.id, trainings, this.selectedMockIds);
+            this._reportRendered = true; // 已渲染报告（或空数据提示），允许打开报告弹窗
             if (!r) {
                 content.innerHTML = `<div class="empty-state"><div class="icon">📭</div><p>${Shared.escapeHtml(student.name)} 在选定范围内暂无成绩数据</p></div>`;
                 return;
