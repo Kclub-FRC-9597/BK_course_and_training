@@ -1,0 +1,9 @@
+# 本地临时文件 / 备份（不纳入版本库）
+_tmp_*
+_commit_msg.txt
+_msg_*.txt
+_rollback_bak_*/
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
