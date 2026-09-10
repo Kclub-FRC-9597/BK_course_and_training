@@ -332,6 +332,150 @@ const Shared = {
         const next = Math.max(...goalTimes.filter(t => t < bestFullScoreTime));
         return isFinite(next) ? next : null;
     },
+
+    // ============ 预估用时区间工具（用于「发挥」分析，纯相对自身，非达标标准） ============
+    // task.estTimes / studentGoals[].estTimes: [最快预期秒, 可接受上限秒]
+    // 回退链：学员级 estTimes → 任务级 estTimes → goalTimes 的 [min, max] → null
+    getEstTimes(task, training, studentId) {
+        if (!task) return null;
+        const norm = (arr) => {
+            if (!Array.isArray(arr)) return null;
+            const nums = arr.map(v => Number(v)).filter(v => isFinite(v) && v > 0).sort((a, b) => a - b);
+            if (nums.length >= 2) return { min: nums[0], max: nums[nums.length - 1], source: 'est' };
+            if (nums.length === 1) return { min: null, max: nums[0], source: 'est' };
+            return null;
+        };
+        if (training && training.studentGoals && studentId) {
+            const sg = training.studentGoals.find(g => g.studentId === studentId && g.taskId === task.id);
+            const r = sg ? norm(sg.estTimes) : null;
+            if (r) return r;
+        }
+        const t = norm(task.estTimes);
+        if (t) return t;
+        const g = this.getGoalTimes(task, training, studentId);
+        if (g && g.length) {
+            const nums = g.map(Number).filter(v => isFinite(v)).sort((a, b) => a - b);
+            if (nums.length) return { min: nums[0], max: nums[nums.length - 1], source: 'goalTimes' };
+        }
+        return null;
+    },
+
+    // ============ 稳健统计工具（纯计算，不碰 DOM） ============
+    stats: {
+        mean(arr) {
+            const a = (arr || []).filter(v => isFinite(v));
+            return a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+        },
+        // 总体标准差（÷n）
+        sd(arr) {
+            const a = (arr || []).filter(v => isFinite(v));
+            if (!a.length) return null;
+            const m = a.reduce((x, y) => x + y, 0) / a.length;
+            return Math.sqrt(a.reduce((x, y) => x + Math.pow(y - m, 2), 0) / a.length);
+        },
+        // p ∈ [0,1]；线性插值分位数
+        quantile(arr, p) {
+            const a = (arr || []).filter(v => isFinite(v)).slice().sort((x, y) => x - y);
+            if (!a.length) return null;
+            if (a.length === 1) return a[0];
+            const k = Math.max(0, Math.min(1, p)) * (a.length - 1);
+            const lo = Math.floor(k);
+            const hi = Math.ceil(k);
+            return lo === hi ? a[lo] : a[lo] + (a[hi] - a[lo]) * (k - lo);
+        },
+        median(arr) { return this.quantile(arr, 0.5); },
+        // 中位绝对离差（MAD）：抗离群的离散度
+        mad(arr) {
+            const a = (arr || []).filter(v => isFinite(v));
+            const m = this.median(a);
+            if (m == null) return null;
+            return this.median(a.map(v => Math.abs(v - m)));
+        },
+        // 稳健"标准差"估计：1.4826 × MAD（正态下 ≈ σ，可用于 68% 覆盖区间）
+        robustSd(arr) {
+            const m = this.mad(arr);
+            return m == null ? null : 1.4826 * m;
+        },
+        iqr(arr) {
+            const q1 = this.quantile(arr, 0.25);
+            const q3 = this.quantile(arr, 0.75);
+            if (q1 == null || q3 == null) return null;
+            return q3 - q1;
+        },
+        // Theil–Sen 稳健斜率（所有点对斜率的中位数），x = 0..n-1
+        theilSen(arr) {
+            const a = (arr || []).filter(v => isFinite(v));
+            if (a.length < 2) return null;
+            const slopes = [];
+            for (let i = 0; i < a.length; i += 1) {
+                for (let j = i + 1; j < a.length; j += 1) slopes.push((a[j] - a[i]) / (j - i));
+            }
+            return this.median(slopes);
+        },
+        // 最小二乘直线拟合 y ~ x（x = 0..n-1）：返回斜率/截距/原空间 R²
+        linFit(arr) {
+            const a = (arr || []).filter(v => isFinite(v));
+            if (a.length < 3) return null;
+            const f = this._fitXY(a.map((_, i) => i), a);
+            if (!f) return null;
+            const fits = a.map((_, i) => f.intercept + f.slope * i);
+            return { slope: f.slope, intercept: f.intercept, r2: this._r2(a, fits) };
+        },
+        // 任意 x 的最小二乘拟合
+        _fitXY(xs, ys) {
+            const n = xs.length;
+            if (n < 3 || n !== ys.length) return null;
+            const mx = this.mean(xs);
+            const my = this.mean(ys);
+            let sxy = 0;
+            let sxx = 0;
+            for (let i = 0; i < n; i += 1) { sxy += (xs[i] - mx) * (ys[i] - my); sxx += (xs[i] - mx) * (xs[i] - mx); }
+            const slope = sxx ? sxy / sxx : 0;
+            return { slope, intercept: my - slope * mx };
+        },
+        _r2(ys, fits) {
+            const n = ys.length;
+            if (!n) return 0;
+            const my = this.mean(ys);
+            let ssRes = 0;
+            let ssTot = 0;
+            for (let i = 0; i < n; i += 1) {
+                ssRes += Math.pow(ys[i] - fits[i], 2);
+                ssTot += Math.pow(ys[i] - my, 2);
+            }
+            return ssTot > 0 ? Math.max(0, 1 - ssRes / ssTot) : 0;
+        },
+        // 线性 vs 饱和（趋近上限）两模型择优
+        // 分数有满分上限 → 曲线是 S 形：中段近似线性、末端趋近饱和
+        // 关键：① 满分点(d≈0)会让 ln d 爆炸，拟合饱和模型时先剔除；② 两模型必须在同一子集、原始空间比 R²
+        compareTrend(arr, K) {
+            const a = (arr || []).filter(v => isFinite(v));
+            const n = a.length;
+            if (n < 4) return null;
+            const all = a.map((_, i) => i);
+            const satIdx = isFinite(K) ? all.filter(i => (K - a[i]) >= 0.005) : [];
+            let satRaw = null;
+            if (satIdx.length >= 4) {
+                const f = this._fitXY(satIdx, satIdx.map(i => Math.log(K - a[i])));
+                if (f) satRaw = { slope: f.slope, intercept: f.intercept, sub: satIdx };
+            }
+            const sub = satRaw ? satRaw.sub : all;
+            const ys = sub.map(i => a[i]);
+            const linF = this._fitXY(sub, ys);
+            const lin = linF ? { slope: linF.slope, r2: this._r2(ys, sub.map(i => linF.intercept + linF.slope * i)) } : null;
+            const sat = satRaw ? (() => {
+                const fits = satRaw.sub.map(i => K - Math.exp(satRaw.intercept + satRaw.slope * i));
+                return {
+                    beta: satRaw.slope,
+                    halfLife: satRaw.slope < 0 ? Math.log(2) / Math.abs(satRaw.slope) : null,
+                    r2: this._r2(satRaw.sub.map(i => a[i]), fits),
+                    n: satRaw.sub.length,
+                };
+            })() : null;
+            const winner = (sat && lin) ? (sat.r2 > lin.r2 + 0.02 ? 'sat' : 'lin') : (sat ? 'sat' : 'lin');
+            return { lin, sat, winner };
+        },
+    },
 };
 
 window.Shared = Shared;

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>评估管理 - MakeX Inspire 成绩统计系统</title>
+    <title>评估管理 - 机器人竞技青训辅助工具</title>
     <link rel="stylesheet" href="style.css" />
     <style>
         /* ===== 评估报告：压缩嵌套卡片间距，节省横向空间 ===== */
@@ -32,27 +32,57 @@
             font-size: 0.76rem;
             color: var(--gray-600);
         }
-        /* ===== 页面工具条（始终可见，独立于文档卡片） ===== */
-        .page-toolbar {
-            max-width: 794px;
-            margin: 0 auto 0.75rem;
-            padding: 0.6rem 0.9rem 0.7rem;
-            background: #f8fafc;
-            border: 1px solid var(--gray-100);
-            border-radius: var(--radius);
+        /* ===== 计划看板头部按钮：统一高度、上下边缘对齐（不随 emoji / 字形度量变化） ===== */
+        .plan-board-head {
+            min-height: 1.9rem;
         }
-        .page-toolbar-head {
-            display: flex;
+        /* 呈现方式切换 + 班级下拉：与同行按钮同高，上下对齐 */
+        .plan-board-head .view-toggle {
+            flex: none;
+            height: 1.9rem;
+            box-sizing: border-box;
+            align-items: stretch;
+        }
+        .plan-board-head .view-toggle .view-btn {
+            display: inline-flex;
             align-items: center;
-            justify-content: space-between;
-            gap: 0.6rem;
-            flex-wrap: wrap;
+            justify-content: center;
+            height: 100%;
+            padding-top: 0;
+            padding-bottom: 0;
+            line-height: 1;
+        }
+        .plan-board-head > select {
+            flex: none;
+            max-width: 170px;
+            height: 1.9rem;
+            padding: 0 0.5rem;
+            font-size: 0.8rem;
+            line-height: 1.2;
+        }
+        .plan-board-head > .btn {
+            flex: 0 0 auto;
+            height: 1.9rem;
+            min-height: 1.9rem;
+            max-height: 1.9rem;
+            padding-top: 0;
+            padding-bottom: 0;
+            line-height: 1;
+            align-items: center;
+            justify-content: center;
+            white-space: nowrap;
         }
         .page-toolbar-title {
             font-size: 1.05rem;
             font-weight: 700;
             color: var(--gray-800);
         }
+        /* 出具存档按钮：仅「导出预览」视图可见 */
+        body:not(.preview-mode) #evalIssueBtn { display: none !important; }
+        /* 创建报告时的量化模板选择：仅「填写」视图可见（预览/打印不需要） */
+        body.preview-mode #evalTplChoiceWrap { display: none !important; }
+        /* 评估计划看板 / 模板管理：仅「填写」视图可见 */
+        body.preview-mode #planBoard { display: none !important; }
         /* ===== 导出预览（同窗口）：隐藏文档内编辑控件，接近 PDF 呈现 ===== */
         body.preview-mode #evalContent button { display: none !important; }
         body.preview-mode .coach-editor-col { display: none !important; }
@@ -81,6 +111,67 @@
         @media print {
             .report-edit-only { display: none !important; }
         }
+        /* ===== 报告填写弹窗（覆盖全屏，内容可上下滚动） ===== */
+        .report-sheet {
+            position: fixed;
+            inset: 0;
+            z-index: 940;
+            display: none;
+            align-items: flex-start;
+            justify-content: center;
+            background: rgba(15, 23, 42, 0.45);
+            padding: 2.5vh 2vw;
+        }
+        .report-sheet.open {
+            display: flex;
+        }
+        .report-sheet-dialog {
+            display: flex;
+            flex-direction: column;
+            width: min(980px, 96vw);
+            max-height: 95vh;
+            background: #fff;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-md);
+            overflow: hidden;
+        }
+        .report-sheet-head {
+            flex: none;
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            padding: 0.55rem 0.85rem 0.5rem;
+            background: #f8fafc;
+            border-bottom: 1px solid var(--gray-200);
+        }
+        .report-sheet-body {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+            padding: 0.9rem 1rem 2rem;
+            background: var(--gray-50);
+        }
+        .report-sheet-body .report-card {
+            max-width: 794px;
+            margin: 0 auto;
+            padding: 0.75rem 0.75rem 1.25rem;
+            background: #fff;
+            border: 1px solid var(--gray-100);
+            border-radius: var(--radius);
+        }
+        body.report-sheet-lock {
+            overflow: hidden;
+        }
+        @media (max-width: 600px) {
+            .report-sheet {
+                padding: 0;
+            }
+            .report-sheet-dialog {
+                width: 100vw;
+                max-height: 100vh;
+                border-radius: 0;
+            }
+        }
         /* ===== 打印 / 导出 PDF ===== */
         @media print {
             @page { size: A4; margin: 10mm; }
@@ -95,8 +186,8 @@
             .container { max-width: none !important; margin: 0 !important; padding: 0 !important; }
             /* 外层报告卡：占满 A4，无卡片感 */
             .container > .card { max-width: none !important; margin: 0 !important; padding: 0 !important; box-shadow: none !important; border: none !important; }
-            /* 隐藏页面工具条、编辑栏与文档内按钮 */
-            .page-toolbar, .coach-editor-col, #evalContent button { display: none !important; }
+            /* 隐藏计划看板、编辑栏与文档内按钮 */
+            .coach-editor-col, #evalContent button, #planBoard { display: none !important; }
             /* 报告内各节：紧凑、无阴影边框 */
             #evalContent .card { margin: 0 0 1rem !important; padding: 0 !important; box-shadow: none !important; border: none !important; }
             #evalContent .card .card-header { margin-bottom: 0.6rem; }
@@ -187,6 +278,15 @@
         @media print {
             #reportWatermark { display: block !important; }
         }
+        /* ===== 打印：报告弹窗只输出正文 ===== */
+        @media print {
+            .report-sheet { display: block !important; position: static !important; inset: auto !important; background: #fff !important; padding: 0 !important; z-index: auto !important; }
+            .report-sheet-dialog { width: auto !important; max-height: none !important; box-shadow: none !important; border: none !important; border-radius: 0 !important; overflow: visible !important; }
+            .report-sheet-head { display: none !important; }
+            .report-sheet-body { overflow: visible !important; max-height: none !important; padding: 0 !important; background: #fff !important; }
+            .report-sheet-body .report-card { max-width: none !important; margin: 0 !important; padding: 0 !important; border: none !important; background: #fff !important; }
+            body.report-sheet-lock { overflow: visible !important; }
+        }
     </style>
 </head>
 <body>
@@ -196,35 +296,56 @@
 
     <div class="container">
         <!-- ===== 评估管理：训练评估报告（按 A4 宽度设计） ===== -->
-        <div class="page-toolbar">
-            <div class="page-toolbar-head">
-                <span class="page-toolbar-title">📝 训练评估报告</span>
-                <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
-                    <div class="view-toggle" id="evalViewToggle">
-                        <button type="button" class="view-btn active" data-view="edit" title="教练填写信息（评分、评语、元素等）">✍️ 填写</button>
-                        <button type="button" class="view-btn" data-view="preview" title="同窗口预览导出效果（同 PDF 呈现）">👁 导出预览</button>
-                    </div>
-                    <button type="button" class="btn btn-sm btn-outline" id="evalHeaderEditBtn" title="编辑报告页面元素（标题、学员信息等）">🧩 编辑元素</button>
-                    <button class="btn btn-sm btn-primary" id="evalGenerateBtn">🔄 生成评估</button>
-                    <button type="button" class="btn btn-sm btn-outline" id="evalPrintBtn" title="导出为 PDF（浏览器打印，可另存为 PDF）">🖨 导出 PDF</button>
+        <!-- 评估计划 ToDo 看板（未完成任务，可拖动排序）；头部常显，空计划时只隐藏卡片区 -->
+        <div id="planBoard" class="plan-board" style="max-width:794px;margin:0 auto;">
+            <div class="plan-board-head" style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;background:#f8fafc;border:1px solid var(--gray-100);border-radius:var(--radius);padding:0.5rem 0.7rem;">
+                <span style="font-weight:700;color:var(--gray-800);">📋 评估计划</span>
+                <div class="view-toggle" id="planViewToggle">
+                    <button type="button" class="view-btn active" data-planview="plan" title="按计划：计划卡片 + 展开查看学员">按计划</button>
+                    <button type="button" class="view-btn" data-planview="student" title="按学员：汇总全部计划的学员，可按班级快速定位">按学员</button>
                 </div>
+                <select id="planStuClass" title="按班级快速定位学员" style="display:none;"></select>
+                <span class="plan-board-actions" style="display:flex;gap:0.4rem;flex-wrap:wrap;margin-left:auto;">
+                    <button type="button" class="btn btn-sm btn-outline" id="evalTplMgmtBtn" title="打开模板管理（量化结构模板 / 模板元素编辑 / PDF 水印）">📁 模板管理</button>
+                    <button type="button" class="btn btn-sm btn-outline" id="planQuickAdd" title="新增评估计划">＋ 新增</button>
+                </span>
             </div>
-            <div class="form-row" id="evalToolbar" style="padding:0.5rem 0 0;gap:0.4rem;align-items:center;margin-top:0.4rem;border-top:1px solid var(--gray-100);">
-                <span style="font-size:0.8rem;color:var(--gray-600);white-space:nowrap;font-weight:600;">👥 学员</span>
-                <select id="evalClassSelect" aria-label="选择班级" style="min-width:110px;padding:0.3rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;background:#fff;color:var(--gray-800);">
-                    <option value="">全部班级</option>
-                </select>
-                <select id="evalStudentSelect" aria-label="选择学员" style="min-width:140px;padding:0.3rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;background:#fff;color:var(--gray-800);">
-                    <option value="">— 请选择学员 —</option>
-                </select>
-                <span style="font-size:0.8rem;color:var(--gray-600);white-space:nowrap;font-weight:600;">📋 评估范围</span>
-                <button type="button" class="btn btn-sm btn-outline" id="scopeTrigger" title="点击选择评估范围（集训 / 赛事，多选）">📋 评估范围：全部</button>
-            </div>
+            <div id="planCards" style="display:none;flex-direction:column;gap:0.4rem;margin-top:0.4rem;"></div>
         </div>
-        <div class="card" style="max-width:794px;margin:0 auto;padding:0.75rem 0.75rem 1.25rem;">
-            <div id="evalContent">
-                <!-- Rendered by JS -->
-                <div class="empty-state"><div class="icon">👆</div><p>请选择学员与集训，生成评估报告</p></div>
+        <!-- 页面引导（当前无计划 / 未打开报告时显示） -->
+        <div id="evalPageEmpty" class="empty-state" style="display:none;max-width:794px;margin:0.6rem auto 0;">
+            <div class="icon">👆</div>
+            <p>从上方「📋 评估计划」新建计划 → 点学员卡上的「✍️ 进入填写」，打开该学员的评估报告</p>
+        </div>
+        <!-- ===== 报告填写弹窗（覆盖全屏，可上下滚动） ===== -->
+        <div class="report-sheet" id="reportSheet">
+            <div class="report-sheet-dialog">
+                <div class="report-sheet-head">
+                    <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                        <span class="page-toolbar-title">📝 训练评估报告</span>
+                        <span id="reportSheetSub" style="font-size:0.85rem;color:var(--gray-600);"></span>
+                        <span style="flex:1;"></span>
+                        <div class="view-toggle" id="evalViewToggle">
+                            <button type="button" class="view-btn active" data-view="edit" title="教练填写信息（评分、评语、元素等）">✍️ 填写</button>
+                            <button type="button" class="view-btn" data-view="preview" title="同窗口预览导出效果（同 PDF 呈现）">👁 导出预览</button>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-outline" id="evalPrintBtn" title="导出为 PDF（浏览器打印，可另存为 PDF）">🖨 导出 PDF</button>
+                        <button type="button" class="btn btn-sm btn-primary" id="evalIssueBtn" title="把当前报告存档为历史版本（同时索引所用量化结构模板）">💾 存档报告</button>
+                        <button type="button" class="btn btn-sm btn-outline" id="reportCloseBtn" title="关闭报告，返回评估计划">✕ 返回计划</button>
+                    </div>
+                    <div id="archiveViewNotice" style="display:none;align-items:center;gap:0.5rem;flex-wrap:wrap;padding:0.4rem 0.6rem;background:#eff6ff;border:1px solid var(--primary-light);border-radius:var(--radius-sm);font-size:0.85rem;color:var(--primary);">
+                        <span id="archiveViewTitle" style="flex:1;min-width:180px;"></span>
+                        <button type="button" class="btn btn-sm btn-outline" id="archiveBackBtn">← 返回当前报告</button>
+                    </div>
+                </div>
+                <div class="report-sheet-body">
+                    <div class="card report-card">
+                        <div id="evalContent">
+                            <!-- Rendered by JS -->
+                            <div class="empty-state"><div class="icon">👆</div><p>请从上方「📋 评估计划」选择学员</p></div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -259,71 +380,6 @@
         </div>
     </div>
 
-    <!-- ========== Modal: 编辑报告元素 ========== -->
-    <div class="modal-overlay" id="reportHeaderModal">
-        <div class="modal-box">
-            <h3>🧩 编辑报告元素</h3>
-            <div class="form-group">
-                <label>页面标题</label>
-                <input type="text" id="reportHeaderTitle" placeholder="如：训练评估报告" />
-            </div>
-            <div class="form-group">
-                <label>教练</label>
-                <input type="text" id="reportHeaderCoach" placeholder="如：Brook" />
-            </div>
-            <div class="form-group">
-                <label>报告填写日期</label>
-                <input type="text" id="reportHeaderDate" placeholder="如：2026/2/25" />
-            </div>
-            <div class="form-group">
-                <label>教练评语 AI 要求提示词（用于 ✨ AI 生成，可自由修改，会随数据包一起发送/复制）</label>
-                <textarea id="reportHeaderAIPrompt" rows="5" style="width:100%;padding:0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;line-height:1.6;font-family:inherit;resize:vertical;box-sizing:border-box;" placeholder="在此输入 AI 撰写评语的要求…"></textarea>
-            </div>
-            <div class="form-group">
-                <label>AI 数据说明（描述发给 AI 的数据结构，帮助 AI 理解字段含义；可修改，随数据包一起发送/复制）</label>
-                <textarea id="reportHeaderAIDataNote" rows="5" style="width:100%;padding:0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;line-height:1.6;font-family:inherit;resize:vertical;box-sizing:border-box;" placeholder="在此描述发给 AI 的评估数据结构…"></textarea>
-            </div>
-            <div class="form-group" style="border-top:1px dashed var(--gray-200);padding-top:0.7rem;margin-top:0.4rem;">
-                <label>🖨️ 导出 PDF 水印（预览 / 打印 / PDF 每页自动填充）</label>
-                <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap;margin-bottom:0.4rem;">
-                    <span style="font-size:0.8rem;color:var(--gray-500);white-space:nowrap;">模板</span>
-                    <select id="wmTemplate" title="选择已保存的水印模板（由你保存）" style="flex:1;min-width:150px;">
-                        <option value="">（自定义）</option>
-                    </select>
-                    <button type="button" class="btn btn-sm btn-outline" id="wmTemplateSave" title="把当前水印设置保存为一个可复用的模板">💾 存为模板</button>
-                    <button type="button" class="btn btn-sm btn-outline" id="wmTemplateDel" style="display:none;" title="删除当前选中的模板">🗑 删除</button>
-                    <label style="display:flex;align-items:center;gap:0.3rem;font-weight:500;font-size:0.8rem;margin:0;white-space:nowrap;">
-                        <input type="checkbox" id="wmEnabled" checked style="margin:0;" /> 启用
-                    </label>
-                </div>
-                <div id="wmTemplateSaveRow" style="display:none;align-items:center;gap:0.4rem;flex-wrap:wrap;margin-bottom:0.4rem;">
-                    <input type="text" id="wmTemplateNewName" placeholder="模板名称，如：家长版 / 内部资料 / 正式…" style="flex:1;min-width:160px;padding:0.3rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;" />
-                    <button type="button" class="btn btn-sm btn-primary" id="wmTemplateSaveConfirm">✔ 保存</button>
-                    <button type="button" class="btn btn-sm btn-outline" id="wmTemplateSaveCancel">取消</button>
-                </div>
-                <textarea id="wmText" rows="2" style="width:100%;padding:0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.85rem;line-height:1.6;font-family:inherit;resize:vertical;box-sizing:border-box;" placeholder="水印文字，可多行；留空则无水印。如：内部资料 / 请勿外传…"></textarea>
-                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:0.4rem 0.8rem;margin-top:0.5rem;align-items:end;">
-                    <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;">透明度 %<input type="number" id="wmOpacity" min="0" max="100" step="1" value="10" /></label>
-                    <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;">倾斜角度 °<input type="number" id="wmAngle" min="-360" max="360" step="1" value="45" /></label>
-                    <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;">字号 px<input type="number" id="wmFontSize" min="10" max="200" step="1" value="28" /></label>
-                    <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;">颜色<select id="wmColor">
-                            <option value="#64748b">浅灰</option>
-                            <option value="#334155">深灰</option>
-                            <option value="#2563eb">蓝</option>
-                            <option value="#dc2626">红</option>
-                            <option value="#16a34a">绿</option>
-                        </select></label>
-                    <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;" title="自动按角度+字号计算平铺间距，≥1 即不会重叠；越小越密">间距倍数<input type="number" id="wmDensity" min="0.6" max="4" step="0.1" value="1.2" /></label>
-                </div>
-                <div style="margin-top:0.35rem;font-size:0.72rem;color:var(--gray-400);line-height:1.6;">💡 系统不内置默认模板：调好文字 / 透明度 / 角度等后点「💾 存为模板」即可保存复用，下拉可套用或删除（仅存本机浏览器）。间距倍数会自动按文字长度与倾斜角度计算平铺密度，避免文字重叠。</div>
-            </div>
-            <div class="modal-actions">
-                <button type="button" class="btn btn-outline" id="reportHeaderCancel">取消</button>
-                <button type="button" class="btn btn-primary" id="reportHeaderSave">✅ 保存并刷新</button>
-            </div>
-        </div>
-    </div>
-
     <!-- ========== Modal: 新增子维度（选择父维度） ========== -->
     <div class="modal-overlay" id="quantAddSubModal">
         <div class="modal-box">
@@ -335,6 +391,244 @@
             <div class="modal-actions">
                 <button type="button" class="btn btn-outline" id="quantAddSubCancel">取消</button>
                 <button type="button" class="btn btn-primary" id="quantAddSubConfirm">✅ 确定新增</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Modal: 量化结构编辑退出（丢弃 / 覆盖保存 / 存为新模板） ========== -->
+    <div class="modal-overlay" id="quantEditExitModal">
+        <div class="modal-box">
+            <h3>📋 量化评估结构已修改</h3>
+            <p style="font-size:0.9rem;color:var(--gray-600);margin:0 0 0.9rem;line-height:1.7;">退出「编辑」前，请选择如何处理本次对量化结构的修改：</p>
+            <div class="quant-exit-actions">
+                <button type="button" class="btn btn-outline" id="quantExitDiscard">🗑 丢弃修改<span class="quant-exit-sub">本次结构改动不保留，恢复为进入编辑前的结构</span></button>
+                <button type="button" class="btn btn-outline" id="quantExitOverwrite">💾 覆盖保存<span class="quant-exit-sub">把本次修改保存到当前学员的量化结构</span></button>
+                <button type="button" class="btn btn-primary" id="quantExitSaveNew">📁 存为新模板<span class="quant-exit-sub">另存为可复用模板（当前学员结构保持不变）</span></button>
+            </div>
+            <div id="quantExitLockHint" style="display:none;font-size:0.8rem;color:#b45309;background:#fef3c7;padding:0.45rem 0.6rem;border-radius:var(--radius-sm);line-height:1.6;margin-top:0.6rem;">🔒 当前为基础「系统内置默认」结构，不可覆盖保存。如需定制，请先「📁 存为新模板」，再到编辑模式「▶ 套用」到该学员。</div>
+            <div id="quantExitNewNameRow" style="display:none;align-items:center;gap:0.4rem;flex-wrap:wrap;margin-top:0.65rem;padding-top:0.65rem;border-top:1px solid var(--gray-100);">
+                <span style="font-size:0.82rem;color:var(--gray-600);white-space:nowrap;">模板名称</span>
+                <input type="text" id="quantExitNewName" placeholder="如：综合评估 V2（供其它学员复用）" style="flex:1;min-width:200px;padding:0.35rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.85rem;" />
+                <button type="button" class="btn btn-sm btn-primary" id="quantExitNewNameConfirm">✔ 保存</button>
+                <button type="button" class="btn btn-sm btn-outline" id="quantExitNewNameCancel">返回</button>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-outline" id="quantExitCancel">继续编辑</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Modal: 导出评估模板（多选） ========== -->
+    <div class="modal-overlay" id="quantTplExportModal">
+        <div class="modal-box">
+            <h3>📤 导出评估模板</h3>
+            <div style="display:flex;gap:0.5rem;margin-bottom:0.4rem;">
+                <button type="button" class="btn btn-sm btn-outline" id="quantTplExportAll">☑ 全选</button>
+                <button type="button" class="btn btn-sm btn-outline" id="quantTplExportNone">☐ 全不选</button>
+            </div>
+            <div class="checkbox-grid" id="quantTplExportList"></div>
+            <label style="display:flex;align-items:center;gap:0.35rem;font-size:0.82rem;color:var(--gray-600);margin:0.5rem 0 0;cursor:pointer;" id="quantTplExportWmRow" title="把已保存的 PDF 水印模板一并写入同一个 JSON 文件">
+                <input type="checkbox" id="quantTplExportWm" checked style="margin:0;" /> 同时导出 PDF 水印模板
+            </label>
+            <div style="font-size:0.75rem;color:var(--gray-400);line-height:1.6;border-top:1px solid var(--gray-100);padding-top:0.5rem;margin-top:0.3rem;">导出的为 JSON 文件，含所选模板的完整结构、报告元素（含赛事规划）与关联集训，可在其它设备用「📥 导入模板」还原（内置默认模板随系统存在，无需导出）。</div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-outline" id="quantTplExportCancel">取消</button>
+                <button type="button" class="btn btn-primary" id="quantTplExportConfirm">⬇ 导出所选</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Modal: 新增 / 编辑评估计划 ========== -->
+    <div class="modal-overlay" id="planModal">
+        <div class="modal-box" style="max-width:560px;">
+            <h3 id="planModalTitle">＋ 新增评估计划</h3>
+            <div class="form-group">
+                <label>计划名称（可选）</label>
+                <input type="text" id="planTitle" maxlength="40" placeholder="留空将自动命名，如：评估计划 · 5 名学员" />
+            </div>
+            <div class="form-group">
+                <label>选择要做评估的学员（左选班级 → 中点学员 → 右为已选中）</label>
+                <div class="plan-pick3">
+                    <div class="plan-pane" style="flex:0 0 118px;">
+                        <div class="plan-pane-head">📁 班级</div>
+                        <div class="plan-pane-body" id="planClassList"></div>
+                    </div>
+                    <div class="plan-pane" style="flex:1 1 0;">
+                        <div class="plan-pane-head">👥 学员</div>
+                        <div class="plan-pane-body" id="planStuList"></div>
+                    </div>
+                    <div class="plan-pane" style="flex:1 1 0;">
+                        <div class="plan-pane-head">✅ 已选中 <span id="planSelCount" style="font-weight:400;color:var(--gray-400);font-size:0.72rem;"></span> <span style="flex:1"></span><button type="button" class="btn btn-sm btn-outline" id="planSelClear" style="padding:0.1rem 0.4rem;">清空</button></div>
+                        <div class="plan-pane-body" id="planSelList"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>评估模板（结构 + 报告元素）</label>
+                <div style="display:flex;gap:0.4rem;align-items:center;">
+                    <select id="planTpl" title="该计划使用的评估模板：决定量化结构与报告元素（页面标题 / 教练 / 报告日期 / AI 提示词与数据说明）；若模板已关联集训，生成时会一并带入评估范围" style="flex:1;min-width:0;"></select>
+                    <button type="button" class="btn btn-sm btn-outline" id="planTplPreview" title="预览所选评估模板（只读，不改变任何设置）">👁 预览</button>
+                </div>
+                <div id="planProjInfo" style="font-size:0.78rem;color:var(--gray-600);margin-top:0.35rem;line-height:1.7;"></div>
+            </div>
+            <div class="form-group">
+                <label>PDF 水印模板</label>
+                <select id="planWmTpl" title="打开 / 导出该计划下学员报告时套用的 PDF 水印模板；选「当前水印设置」则不改动"></select>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-outline" id="planCancel">取消</button>
+                <button type="button" class="btn btn-primary" id="planSave">✅ 保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Modal: 评估模板管理 ========== -->
+    <div class="modal-overlay" id="tplMgmtModal">
+        <div class="modal-box" style="max-width:660px;">
+            <h3>📁 模板管理</h3>
+            <div class="tpl-tabs" id="tplMgmtTabs">
+                <button type="button" class="tpl-tab active" data-tpltab="quant">📋 评估模板</button>
+                <button type="button" class="tpl-tab" data-tpltab="watermark">🖨 PDF 水印</button>
+            </div>
+            <!-- 标签页：量化结构模板 -->
+            <div class="tpl-tab-pane active" id="tplPaneQuant">
+                <div class="tpl-sec">
+                    <div style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center;margin-bottom:0.4rem;">
+                        <button type="button" class="btn btn-sm btn-outline" id="tplMgmtNewBtn" title="把当前结构 + 当前报告元素存为一个新评估模板">＋ 以当前结构新建模板</button>
+                        <button type="button" class="btn btn-sm btn-outline" id="tplMgmtExportBtn" title="多选导出为 JSON（含结构 / 报告元素 / 赛事规划 / 关联集训）">📤 导出模板</button>
+                        <button type="button" class="btn btn-sm btn-outline" id="tplMgmtImportBtn" title="从 JSON 文件导入评估模板（结构 + 报告元素 + 赛事规划 + 关联集训；同名可覆盖或自动重命名）">📥 导入模板</button>
+                        <input type="file" id="tplMgmtImportFile" accept=".json,application/json" style="display:none;" />
+                    </div>
+                    <div id="tplMgmtNewRow" style="display:none;align-items:center;gap:0.4rem;flex-wrap:wrap;margin-bottom:0.4rem;">
+                        <span style="font-size:0.8rem;color:var(--gray-600);white-space:nowrap;">模板名称</span>
+                        <input type="text" id="tplMgmtNewName" placeholder="如：综合评估 V3" style="flex:1;min-width:160px;padding:0.3rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;" />
+                        <button type="button" class="btn btn-sm btn-primary" id="tplMgmtNewConfirm">✔ 保存</button>
+                        <button type="button" class="btn btn-sm btn-outline" id="tplMgmtNewCancel">取消</button>
+                    </div>
+                    <div id="tplMgmtList"></div>
+                    <div id="tplProjEditor" style="display:none;margin-top:0.5rem;border-top:1px dashed var(--gray-200);padding-top:0.5rem;">
+                        <div style="font-size:0.85rem;font-weight:700;margin-bottom:0.3rem;">🎯 关联集训 —— <span id="tplProjName"></span></div>
+                        <div id="tplProjList" class="checkbox-grid" style="max-height:150px;overflow:auto;"></div>
+                        <div style="display:flex;gap:0.4rem;margin-top:0.4rem;flex-wrap:wrap;">
+                            <button type="button" class="btn btn-sm btn-primary" id="tplProjSave">✔ 保存关联</button>
+                            <button type="button" class="btn btn-sm btn-outline" id="tplProjClear">清除关联</button>
+                            <button type="button" class="btn btn-sm btn-outline" id="tplProjCancel">取消</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <!-- 标签页：PDF 水印（全局设置，与学员无关） -->
+            <div class="tpl-tab-pane" id="tplPaneWatermark">
+                <div class="tpl-sec">
+                    <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap;margin-bottom:0.4rem;">
+                        <span style="font-size:0.8rem;color:var(--gray-500);white-space:nowrap;">模板</span>
+                        <select id="wmTemplate" title="选择已保存的水印模板（由你保存）" style="flex:1;min-width:150px;">
+                            <option value="">（自定义）</option>
+                        </select>
+                        <button type="button" class="btn btn-sm btn-outline" id="wmTemplateSave" title="把当前水印设置保存为一个可复用的模板">💾 存为模板</button>
+                        <button type="button" class="btn btn-sm btn-outline" id="wmTemplateDel" style="display:none;" title="删除当前选中的模板">🗑 删除</button>
+                        <label style="display:flex;align-items:center;gap:0.3rem;font-weight:500;font-size:0.8rem;margin:0;white-space:nowrap;">
+                            <input type="checkbox" id="wmEnabled" checked style="margin:0;" /> 启用
+                        </label>
+                    </div>
+                    <div id="wmTemplateSaveRow" style="display:none;align-items:center;gap:0.4rem;flex-wrap:wrap;margin-bottom:0.4rem;">
+                        <input type="text" id="wmTemplateNewName" placeholder="模板名称，如：家长版 / 内部资料 / 正式…" style="flex:1;min-width:160px;padding:0.3rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;" />
+                        <button type="button" class="btn btn-sm btn-primary" id="wmTemplateSaveConfirm">✔ 保存</button>
+                        <button type="button" class="btn btn-sm btn-outline" id="wmTemplateSaveCancel">取消</button>
+                    </div>
+                    <textarea id="wmText" rows="2" style="width:100%;padding:0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.85rem;line-height:1.6;font-family:inherit;resize:vertical;box-sizing:border-box;" placeholder="水印文字，可多行；留空则无水印。如：内部资料 / 请勿外传…"></textarea>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:0.4rem 0.8rem;margin-top:0.5rem;align-items:end;">
+                        <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;">透明度 %<input type="number" id="wmOpacity" min="0" max="100" step="1" value="10" /></label>
+                        <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;">倾斜角度 °<input type="number" id="wmAngle" min="-360" max="360" step="1" value="45" /></label>
+                        <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;">字号 px<input type="number" id="wmFontSize" min="10" max="200" step="1" value="28" /></label>
+                        <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;">颜色<select id="wmColor">
+                                <option value="#64748b">浅灰</option>
+                                <option value="#334155">深灰</option>
+                                <option value="#2563eb">蓝</option>
+                                <option value="#dc2626">红</option>
+                                <option value="#16a34a">绿</option>
+                            </select></label>
+                        <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;" title="自动按角度+字号计算平铺间距，≥1 即不会重叠；越小越密">间距倍数<input type="number" id="wmDensity" min="0.6" max="4" step="0.1" value="1.2" /></label>
+                    </div>
+                    <div style="margin-top:0.35rem;font-size:0.72rem;color:var(--gray-400);line-height:1.6;">💡 系统不内置默认模板：调好文字 / 透明度 / 角度等后点「💾 存为模板」即可保存复用，下拉可套用或删除（仅存本机浏览器）。间距倍数会自动按文字长度与倾斜角度计算平铺密度，避免文字重叠。</div>
+                    <div style="margin-top:0.5rem;">
+                        <button type="button" class="btn btn-sm btn-primary" id="wmSaveBtn" title="保存后立即生效：预览 / 打印 / 导出 PDF 时每页自动填充">💾 保存水印设置</button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-outline" id="tplMgmtClose">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Modal: 学员评估记录（按学员呈现点击卡片打开） ========== -->
+    <div class="modal-overlay" id="stuRecordsModal">
+        <div class="modal-box" style="max-width:620px;">
+            <h3 id="stuRecordsTitle">👤 学员评估记录</h3>
+            <div id="stuRecordsList" style="max-height:56vh;overflow-y:auto;"></div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-outline" id="stuRecordsClose">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== Modal: 评估模板（预览 / 编辑 双模式；编辑含结构 + 报告元素） ========== -->
+    <div class="modal-overlay" id="tplPreviewModal">
+        <div class="modal-box" style="max-width:780px;">
+            <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                <h3 id="tplPreviewTitle" style="flex:1;min-width:160px;margin:0;">👁 预览模板</h3>
+                <div class="view-toggle" id="tplPreviewToggle">
+                    <button type="button" class="view-btn active" data-tplmode="preview" title="只读预览评估模板">👁 预览</button>
+                    <button type="button" class="view-btn" data-tplmode="edit" title="编辑评估模板（结构 + 报告元素）">✎ 编辑</button>
+                </div>
+            </div>
+            <div id="tplPreviewMeta" style="font-size:0.78rem;color:var(--gray-500);margin:0.45rem 0 0.6rem;line-height:1.6;"></div>
+            <!-- 编辑模式的「报告元素」区（与结构一起保存；内置默认仅可编辑此部分） -->
+            <div id="tplPreviewElemBox" style="display:none;margin:0 0 0.6rem;padding:0.5rem 0.6rem 0.6rem;background:#f8fafc;border:1px solid var(--gray-100);border-radius:var(--radius-sm);">
+                <div style="font-size:0.8rem;font-weight:700;color:var(--gray-700);margin-bottom:0.35rem;">🧩 报告元素</div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0.4rem 0.8rem;">
+                    <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;">页面标题<input type="text" id="reportHeaderTitle" placeholder="如：训练评估报告" /></label>
+                    <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;">教练<input type="text" id="reportHeaderCoach" placeholder="如：Brook" /></label>
+                    <label style="display:flex;flex-direction:column;gap:0.2rem;font-size:0.78rem;color:var(--gray-600);margin:0;">报告填写日期<input type="text" id="reportHeaderDate" placeholder="留空则自动用报告当天日期" /></label>
+                </div>
+                <label style="display:block;margin:0.5rem 0 0;font-size:0.78rem;color:var(--gray-600);" title="用于 ✨ AI 生成教练评语，会随数据包一起发送/复制">教练评语 AI 要求提示词
+                    <textarea id="reportHeaderAIPrompt" rows="3" style="width:100%;padding:0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;line-height:1.6;font-family:inherit;resize:vertical;box-sizing:border-box;" placeholder="在此输入 AI 撰写评语的要求…"></textarea>
+                </label>
+                <label style="display:block;margin:0.5rem 0 0;font-size:0.78rem;color:var(--gray-600);" title="描述发给 AI 的数据结构，帮助 AI 理解字段含义；随数据包一起发送/复制">AI 数据说明
+                    <textarea id="reportHeaderAIDataNote" rows="3" style="width:100%;padding:0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;line-height:1.6;font-family:inherit;resize:vertical;box-sizing:border-box;" placeholder="在此描述发给 AI 的评估数据结构…"></textarea>
+                </label>
+                <div style="margin:0.5rem 0 0;" title="报告里的「📅 赛事规划」表，随本模板保存；引用本模板的计划/报告统一使用这份内容，填写报告时只读展示">
+                    <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;">
+                        <span style="font-size:0.78rem;color:var(--gray-600);">📅 赛事规划（报告内只读展示）</span>
+                        <button type="button" class="btn btn-sm btn-outline" id="tplEditCompPlanAdd">＋ 添加一行</button>
+                    </div>
+                    <div style="overflow-x:auto;margin-top:0.25rem;">
+                        <table class="score-table" style="font-size:0.82rem;">
+                            <thead>
+                                <tr>
+                                    <th style="min-width:150px;">赛事</th>
+                                    <th style="width:140px;text-align:center;">预计时间</th>
+                                    <th style="width:44px;"></th>
+                                </tr>
+                            </thead>
+                            <tbody id="tplEditCompPlanBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <div id="tplPreviewBody" style="max-height:56vh;overflow:auto;"></div>
+            <!-- 编辑模式底部操作行（单行：另存输入+另存 · 取消 · 保存） -->
+            <div id="tplPreviewEditFoot" style="display:none;align-items:center;gap:0.4rem;flex-wrap:wrap;margin-top:0.6rem;padding-top:0.6rem;border-top:1px solid var(--gray-100);">
+                <input type="text" id="tplEditNewName" placeholder="另存为新模板名（留空则不另存）" style="flex:1;min-width:180px;padding:0.3rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.85rem;" />
+                <button type="button" class="btn btn-sm btn-outline" id="tplEditNewConfirm" title="用左侧名称另存为新模板（当前编辑的模板保持不变）">📁 另存</button>
+                <span style="display:flex;gap:0.4rem;flex-wrap:wrap;margin-left:auto;">
+                    <button type="button" class="btn btn-outline" id="tplEditCancel" title="放弃本次改动，回到预览">取消</button>
+                    <button type="button" class="btn btn-primary" id="tplEditSave" title="把改动保存到该模板">💾 保存</button>
+                </span>
+            </div>
+            <div class="modal-actions" id="tplPreviewCloseRow">
+                <button type="button" class="btn btn-outline" id="tplPreviewClose">关闭</button>
             </div>
         </div>
     </div>

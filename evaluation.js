@@ -13,6 +13,15 @@
         _modalTrainings: null,
         _modalData: null,
         viewMode: 'edit', // 'edit' 填写 | 'preview' 导出预览（同窗口）
+        quantSubMode: 'fill', // 'fill' 填写（只打分）| 'edit' 编辑（结构改动，退出编辑时询问 丢弃/覆盖/存模板）
+        _quantEditBaseline: null, // 进入「编辑」时的结构快照（用于差异判断 / 丢弃还原）
+        _quantExitPrompting: false,
+        _quantExitCb: null,
+        _quantExitCancelCb: null,
+        viewingArchiveId: null, // 正在查看的已出具报告存档 id（null = 处于当前报告）
+        _fillPlanId: null, // 当前进入填写的计划 id（用于退出时自动记填写进度）
+        _fillSid: null, // 当前进入填写的学员 id
+        _fillBase: null, // 进入填写时的数据快照（退出时对比判断“有改动”）
         // 量化评估模板：维度 → 子维度 → 评价细则（每条细则含 名称 + 参考评分 ref；综合同龄指数 = 评分/参考评分）
         // 填写模式下 维度/子维度/细则 均可改名与增删、参考评分可编辑，按学员保存在 evalQuantTemplate
         // 「内置默认」模板：维度一/二/三（各自含 子维度一/二/三），每个子维度含 3 条细则
@@ -107,10 +116,13 @@
         init() {
             Shared.loadData();
             this.migrateLegacyQuantTemplates(); // 清除旧“知识与技能/赛事能力/个人能力”默认结构，统一用内置默认
+            this.migrateTemplateElements(); // 把旧「元素模板 / 全局元素设置」并入「评估模板」
             this.initScope(); // 默认全选
             this.populateClassSelect();
             this.bindEvents();
             this.updateScopeSummary();
+            this.populateTemplateChoiceSelect(); // 报告级「量化模板」下拉（静态，模板可能已存于本地）
+            this.renderPlanBoard(); // 评估计划 ToDo 看板
             this.initUnsavedGuard(); // 未提交改动时离开页面给出提示
         },
 
@@ -147,6 +159,20 @@
 
         // ============ 视图切换：填写 / 导出预览（同窗口） ============
         setViewMode(mode) {
+            const target = mode === 'preview' ? 'preview' : 'edit';
+            if (target === this.viewMode) return;
+            // 正在查看已出具报告存档时：先返回当前报告，再按需切换视图
+            if (this.viewingArchiveId) {
+                const was = this.viewMode;
+                this.backFromArchive();
+                if (target === was) return;
+                this.guardQuantEditExit(() => this._applyViewMode(target));
+                return;
+            }
+            // 量化结构处于「编辑」且可能未保存时，先让用户决定（丢弃/覆盖保存/存为新模板）再切换视图
+            this.guardQuantEditExit(() => this._applyViewMode(target));
+        },
+        _applyViewMode(mode) {
             this.viewMode = mode === 'preview' ? 'preview' : 'edit';
             document.body.classList.toggle('preview-mode', this.viewMode === 'preview');
             // 离开编辑即保存：切换视图前结束教练评语 / 最终评语编辑
@@ -158,8 +184,8 @@
             }
             // 量化评估表：按视图模式重渲染（填写=可编辑，预览=只读/纯文本）
             this.refreshQuantTableMode();
-            // 赛事规划：按视图模式重渲染（填写=可编辑输入框，预览=纯文本）
-            this.refreshCompPlanMode();
+            // 任务点评：按视图模式重渲染（填写=输入框，预览=文本）
+            this.refreshTaskCommentMode();
             // 预览模式：量化评估（综合）与各任务表现趋势由隐藏转为显示，需以可见尺寸重绘
             if (this.viewMode === 'preview') {
                 if (document.getElementById('quantSummaryBody')) this.drawRadarCharts();
@@ -169,6 +195,1384 @@
             }
             // 水印层（切换视图时同步）
             this.renderWatermark();
+        },
+
+        // ============ 量化评估细则：填写 / 编辑 子模式 ============
+        // 填写 = 只打分（结构字段只读）；编辑 = 可改结构（改名/增删/参考分等），改动先入草稿不落盘，
+        // 退出「编辑」时若有修改，弹窗询问：丢弃 / 覆盖保存（应用到当前学员）/ 存为新模板。
+        guardQuantEditExit(afterExit, cancelExit) {
+            if (this.quantSubMode !== 'edit') { if (afterExit) afterExit(); return; }
+            this.askQuantEditExit(afterExit, cancelExit);
+        },
+        // 量化模式切换：进入编辑 / 退回填写
+        setQuantSubMode(mode) {
+            const target = mode === 'edit' ? 'edit' : 'fill';
+            if (target === this.quantSubMode) return;
+            if (target === 'edit') {
+                this.beginQuantEdit();
+            } else {
+                // 编辑 → 填写：先处理未保存的结构改动
+                this.askQuantEditExit();
+            }
+        },
+        // 进入「编辑」：以当前已保存结构为基线，后续改动仅作用于草稿
+        beginQuantEdit() {
+            if (this.quantSubMode === 'edit' || this._quantExitPrompting) return;
+            if (!document.getElementById('quantTableContainer')) return;
+            this._quantEditBaseline = JSON.parse(JSON.stringify(this.getQuantTemplate() || []));
+            this._quantTemplate = JSON.parse(JSON.stringify(this._quantEditBaseline));
+            this.quantSubMode = 'edit';
+            this.refreshQuantTableMode();
+            this.updateQuantModeUI();
+        },
+        // 当前生效结构：编辑模式取草稿，否则取已保存结构
+        currentQuantTemplate() {
+            if (this.quantSubMode === 'edit' && this._quantTemplate && this._quantTemplate.length) return this._quantTemplate;
+            return this.getQuantTemplate();
+        },
+        quantTemplatesEqual(a, b) {
+            return JSON.stringify(a || []) === JSON.stringify(b || []);
+        },
+        // 是否为“系统内置默认”结构（维度一/二/三）：作为种子，不可被直接覆盖保存
+        isBuiltinDefaultStructure(tpl) {
+            return this.quantTemplatesEqual(tpl || [], this.defaultQuantTemplate() || []);
+        },
+        // 本次“覆盖保存”是否会改写系统内置默认副本
+        _overwriteTargetsBuiltin() {
+            return this.isBuiltinDefaultStructure(this._quantEditBaseline);
+        },
+        // 同步退出弹窗中“覆盖保存”的可用态：目标是系统内置默认时置灰（点击给提示）
+        updateQuantExitLockUI() {
+            const btn = document.getElementById('quantExitOverwrite');
+            if (!btn) return;
+            const locked = this._overwriteTargetsBuiltin();
+            btn.classList.toggle('quant-locked', locked);
+            btn.title = locked
+                ? '系统内置默认模板不可覆盖保存；如需定制请「存为新模板」，再在编辑模式「▶ 套用」到该学员'
+                : '把本次修改保存到当前学员的量化结构';
+            const hint = document.getElementById('quantExitLockHint');
+            if (hint) hint.style.display = locked ? 'block' : 'none';
+        },
+        // 结构改动落盘：报告编辑/模板编辑模式只改草稿（不落盘，退出时由用户决定）；否则直接保存
+        persistQuantStructure(t) {
+            if (this.quantSubMode !== 'edit' && !this._tplEditCtx) this.saveQuantTemplate(t);
+        },
+        // 同步 模式切换按钮 高亮 / 编辑提示 / 结构工具栏 显隐
+        updateQuantModeUI() {
+            const edit = this.quantSubMode === 'edit';
+            const tog = document.getElementById('quantModeToggle');
+            if (tog) tog.querySelectorAll('.view-btn').forEach((b) => b.classList.toggle('active', b.dataset.quantmode === this.quantSubMode));
+            const hint = document.getElementById('quantEditHint');
+            if (hint) hint.style.display = edit ? 'inline-block' : 'none';
+            const tools = document.getElementById('quantStructTools');
+            if (tools) tools.style.display = edit ? 'inline-flex' : 'none';
+            const saveRow = document.getElementById('quantTplSaveRow');
+            if (saveRow && !edit) saveRow.style.display = 'none'; // 非编辑模式收起「存为模板」名称输入行
+        },
+        // 请求退出编辑：无改动则直接退出；有改动弹窗询问；完成退出后回调 cb；用户取消（继续编辑）回调 cancelExit
+        askQuantEditExit(cb, cancelCb) {
+            if (this.quantSubMode !== 'edit') { if (cb) cb(); return; }
+            if (this._quantExitPrompting) return;
+            if (this.quantTemplatesEqual(this._quantEditBaseline, this._quantTemplate || [])) {
+                this._leaveQuantEdit();
+                if (cb) cb();
+                return;
+            }
+            this._quantExitCb = cb || null;
+            this._quantExitCancelCb = cancelCb || null;
+            this._quantExitPrompting = true;
+            const modal = document.getElementById('quantEditExitModal');
+            if (modal) {
+                this._resetQuantExitModalState();
+                modal.classList.add('open');
+                this.updateQuantExitLockUI(); // 目标为系统内置默认时锁定「覆盖保存」
+            } else {
+                // 兜底：无弹窗容器时当作“丢弃”直接退出
+                this._quantExitPrompting = false;
+                this._leaveQuantEdit();
+                if (cb) cb();
+            }
+        },
+        // 实际退出「编辑」（回到填写），按当前已保存结构重渲染
+        _leaveQuantEdit() {
+            this.quantSubMode = 'fill';
+            this._quantEditBaseline = null;
+            this._quantExitPrompting = false;
+            this.refreshQuantTableMode();
+            this.updateQuantModeUI();
+        },
+        // —— 退出编辑弹窗：三个动作 + 取消 ——
+        quantExitDiscard() {
+            if (!this._quantExitPrompting) return;
+            this._leaveQuantEdit(); // 不保存草稿 → 自动回到已保存结构
+            this._quantExitFinish();
+            this.toast('已丢弃本次结构修改');
+        },
+        quantExitOverwrite() {
+            if (!this._quantExitPrompting) return;
+            // 目标仍是“系统内置默认”结构时不可覆盖（种子只读），需先另存为新模板再套用
+            if (this._overwriteTargetsBuiltin()) {
+                this.toast('系统内置模板不可修改：请选择「存为新模板」，再到编辑模式「▶ 套用」到该学员', 'warning');
+                return;
+            }
+            if (!this.selectedStudentId) { this.toast('未选择学员，无法覆盖保存', 'warning'); return; }
+            this.saveQuantTemplate(JSON.parse(JSON.stringify(this._quantTemplate || [])));
+            this._leaveQuantEdit();
+            this._quantExitFinish();
+            this.toast('已覆盖保存到当前学员');
+        },
+        quantExitShowNewName(show) {
+            if (!this._quantExitPrompting) return;
+            const row = document.getElementById('quantExitNewNameRow');
+            const inp = document.getElementById('quantExitNewName');
+            if (row) row.style.display = (show === false) ? 'none' : 'flex';
+            if (inp && show !== false) inp.focus();
+        },
+        quantExitSaveNew() {
+            if (!this._quantExitPrompting) return;
+            const inp = document.getElementById('quantExitNewName');
+            const name = inp ? inp.value.trim() : '';
+            if (!name) { this.toast('请输入模板名称', 'warning'); if (inp) inp.focus(); return; }
+            if (this.isReservedStructName(name)) {
+                this.toast('「默认/default」为系统内置模板，用户模板不能占用该名称', 'warning');
+                if (inp) { inp.value = ''; inp.focus(); }
+                return;
+            }
+            // 已被已出具报告引用的模板只读：不可同名覆盖
+            if (!this.assertTemplateWritable(name)) return;
+            const wasBuiltin = this.isBuiltinDefaultStructure(this._quantEditBaseline); // 覆盖目标是否为系统内置默认（不可覆盖，仅可另存）
+            this.saveStructureTemplate(name, JSON.parse(JSON.stringify(this._quantTemplate || [])));
+            this.refreshQuantStructSelect(name);
+            this._leaveQuantEdit(); // 仅存为可复用模板，当前学员结构保持不变
+            this._quantExitFinish();
+            if (wasBuiltin) {
+                this.toast(`已存为新模板「${name}」（系统内置默认未改动）；如需应用到当前学员，请在编辑模式「▶ 套用」该模板`);
+            } else {
+                this.toast(`已保存为新模板「${name}」（当前学员结构未改变）`);
+            }
+        },
+        quantExitCancel() {
+            if (!this._quantExitPrompting) return;
+            const cc = this._quantExitCancelCb;
+            this._quantExitCb = null;
+            this._quantExitCancelCb = null;
+            this._quantExitPrompting = false;
+            this._resetQuantExitModalState();
+            const modal = document.getElementById('quantEditExitModal');
+            if (modal) modal.classList.remove('open');
+            if (cc) cc(); // 取消 = 停留在编辑（调用方按需撤销 / 继续）
+        },
+        _quantExitFinish() {
+            const cb = this._quantExitCb;
+            this._quantExitCb = null;
+            this._quantExitCancelCb = null;
+            this._quantExitPrompting = false;
+            this._resetQuantExitModalState();
+            const modal = document.getElementById('quantEditExitModal');
+            if (modal) modal.classList.remove('open');
+            if (cb) cb();
+        },
+        _resetQuantExitModalState() {
+            const row = document.getElementById('quantExitNewNameRow');
+            if (row) row.style.display = 'none';
+            const inp = document.getElementById('quantExitNewName');
+            if (inp) inp.value = '';
+        },
+
+        // ============ 出具报告存档：已出具记录 + 量化模板索引 + 模板冻结 ============
+        // 「出具/存档」在导出预览视图触发：把当前报告静态快照存入本地，并记录其用量化结构模板索引；
+        // 保存超过 1 个月（30 天）的存档自动成为「定稿」（只读、不可删除/覆盖）；
+        // 被存档引用的用户模板只读：不可删除 / 不可同名覆盖，需改动请「另存为新模板」。
+        getIssuedReports() {
+            try { return JSON.parse(localStorage.getItem('evalIssuedReports') || '[]'); } catch (e) { return []; }
+        },
+        saveIssuedReports(list) {
+            try { localStorage.setItem('evalIssuedReports', JSON.stringify(list)); } catch (e) { /* ignore */ }
+        },
+        // 保存超过 1 个月（30 天）自动定稿
+        isIssuedFinal(rec) {
+            const t = rec && rec.savedAt ? new Date(rec.savedAt).getTime() : 0;
+            return t > 0 && (Date.now() - t) > 30 * 24 * 3600 * 1000;
+        },
+        // 当前报告所用的量化结构 → 匹配的模板索引（用于存档标签与冻结判断）
+        matchQuantTemplateIndex() {
+            const cur = this.currentQuantTemplate() || [];
+            if (this.quantTemplatesEqual(cur, this.defaultQuantTemplate() || [])) return { key: '__default__', label: '内置默认' };
+            const tpls = this.getQuantStructTemplates() || {};
+            for (const name of Object.keys(tpls)) {
+                if (this.isReservedStructName(name)) continue;
+                if (this.quantTemplatesEqual(cur, tpls[name])) return { key: name, label: name };
+            }
+            return { key: '__custom__', label: '（自定义结构）' };
+        },
+        // 被已出具报告索引引用的用户模板名（这些模板只读：不可删除 / 不可同名覆盖）
+        referencedTemplateNames() {
+            const refs = {};
+            this.getIssuedReports().forEach((r) => {
+                const k = r && r.quantTemplateKey;
+                if (k && k !== '__default__' && k !== '__custom__') refs[k] = true;
+            });
+            return refs;
+        },
+        templateReferenced(name) {
+            return !!this.referencedTemplateNames()[name];
+        },
+        // 模板可写性断言：被引用则禁止覆盖/删除
+        assertTemplateWritable(name) {
+            if (!this.templateReferenced(name)) return true;
+            const cnt = this.getIssuedReports().filter((r) => r.quantTemplateKey === name).length;
+            this.toast(`模板「${name}」已被 ${cnt} 份历史报告引用，处于只读状态；如需改动请「另存为新模板」`, 'warning');
+            return false;
+        },
+        // 把当前报告内容序列化为“静态只读快照”（去掉编辑控件，canvas 转图片），供存档回看/再次导出
+        snapshotEvalContentHtml() {
+            const src = document.getElementById('evalContent');
+            if (!src) return '';
+            const clone = src.cloneNode(true);
+            // 移除编辑态专用容器
+            clone.querySelectorAll('.report-edit-only, .coach-editor-col').forEach((n) => n.remove());
+            // 表单控件 → 纯文本
+            clone.querySelectorAll('input, textarea, select').forEach((el) => {
+                const sp = document.createElement('span');
+                const v = (el.value != null ? el.value : '');
+                sp.textContent = v;
+                const st = el.getAttribute('style');
+                if (st) sp.setAttribute('style', st.replace(/border[^;]*;?/gi, '').replace(/width:\s*auto;?/gi, ''));
+                sp.removeAttribute('title');
+                if (el.parentNode) el.parentNode.replaceChild(sp, el);
+            });
+            // 残留按钮 / 可编辑区
+            clone.querySelectorAll('button, [contenteditable]').forEach((n) => n.remove());
+            // canvas（雷达 / 折线）→ 图片
+            clone.querySelectorAll('canvas').forEach((cv) => {
+                try {
+                    const img = document.createElement('img');
+                    img.src = cv.toDataURL('image/png');
+                    img.alt = '';
+                    img.width = cv.width;
+                    img.height = cv.height;
+                    const st = cv.getAttribute('style');
+                    if (st) img.setAttribute('style', st);
+                    if (cv.parentNode) cv.parentNode.replaceChild(img, cv);
+                } catch (e) { /* 忽略单张失败 */ }
+            });
+            return clone.innerHTML;
+        },
+        // 出具并保存当前报告（导出预览视图）
+        issueReport() {
+            if (this.viewingArchiveId) { this.toast('正在查看历史报告，请先返回当前报告', 'warning'); return false; }
+            if (this.viewMode !== 'preview') { this.toast('请先在「👁 导出预览」视图再存档报告', 'warning'); return false; }
+            if (!this.selectedStudentId) { this.toast('未选择学员，无法存档', 'warning'); return false; }
+            const student = (Shared.data.students || []).find((s) => s.id === this.selectedStudentId);
+            if (!student) { this.toast('未找到学员', 'warning'); return false; }
+            const idx = this.matchQuantTemplateIndex();
+            let header = {};
+            if (typeof this.getReportHeader === 'function') { try { header = this.getReportHeader(student) || {}; } catch (e) { header = {}; } }
+            const rec = {
+                id: (Shared && Shared.generateId) ? Shared.generateId() : ('r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7)),
+                studentId: student.id,
+                studentName: student.name,
+                className: header.className || '',
+                title: header.title || '训练评估报告',
+                date: header.date || '',
+                coach: header.coach || '',
+                quantTemplateKey: idx.key,
+                quantTemplateLabel: idx.label,
+                savedAt: new Date().toISOString(),
+                html: this.snapshotEvalContentHtml(),
+            };
+            if (!rec.html) { this.toast('报告内容为空，无法存档', 'warning'); return false; }
+            const list = this.getIssuedReports();
+            list.push(rec);
+            this.saveIssuedReports(list);
+            this._markCurrentReportExported(); // 存档即视为「报告已导出」
+            this.toast(`已出具并存档「${student.name}」的报告（量化模板：${rec.quantTemplateLabel}）`);
+            return true;
+        },
+        // —— 历史报告存档：回看 / 删除（入口在「按学员 → 学员评估记录」弹窗）——
+        viewIssued(id) {
+            const rec = this.getIssuedReports().find((r) => r.id === id);
+            if (!rec) { this.toast('未找到该存档', 'warning'); return; }
+            this.viewingArchiveId = id;
+            const content = document.getElementById('evalContent');
+            if (content) content.innerHTML = rec.html || '';
+            const notice = document.getElementById('archiveViewNotice');
+            const title = document.getElementById('archiveViewTitle');
+            if (notice && title) {
+                title.textContent = `📄 正在查看历史报告：${rec.studentName || ''}${rec.date ? ' · ' + rec.date : ''}（${this.isIssuedFinal(rec) ? '🔒 定稿' : '已存档'} · 模板：${rec.quantTemplateLabel || '—'}）`;
+                notice.style.display = 'flex';
+            }
+            const ib = document.getElementById('evalIssueBtn');
+            if (ib) ib.style.display = 'none';
+            this.openReportSheet(`${rec.studentName || ''}${rec.date ? ' · ' + rec.date : ''} · 模板：${rec.quantTemplateLabel || '—'}`);
+        },
+        deleteIssued(id) {
+            const rec = this.getIssuedReports().find((r) => r.id === id);
+            if (!rec) return;
+            if (this.isIssuedFinal(rec)) { this.toast('该报告已定稿（保存超过 1 个月），不可删除', 'warning'); return; }
+            if (!confirm(`删除历史报告（${rec.studentName || ''} · ${rec.title || ''}）？若该报告是某模板的唯一引用，删除后该模板将解除只读。`)) return;
+            const list = this.getIssuedReports().filter((r) => r.id !== id);
+            this.saveIssuedReports(list);
+            this.toast('已删除该存档');
+        },
+        // 从“查看已出具报告”返回当前报告的编辑态
+        backFromArchive() {
+            if (!this.viewingArchiveId) return;
+            this.viewingArchiveId = null;
+            const notice = document.getElementById('archiveViewNotice');
+            if (notice) notice.style.display = 'none';
+            const ib = document.getElementById('evalIssueBtn');
+            if (ib && this.viewMode === 'preview') ib.style.display = '';
+            if (this.selectedStudentId && (this.selectedTrainingIds || []).length) this.generate();
+            else this.closeReportSheet();
+        },
+        _hideIssueBtnForArchive(hidden) {
+            const ib = document.getElementById('evalIssueBtn');
+            if (ib) ib.style.display = hidden ? 'none' : '';
+        },
+
+        // ============ 评估计划 ToDo（新增 / 卡片 / 拖动排序） ============
+        getPlans() {
+            try { return JSON.parse(localStorage.getItem('evalPlans') || '[]'); } catch (e) { return []; }
+        },
+        savePlans(list) {
+            try { localStorage.setItem('evalPlans', JSON.stringify(list)); } catch (e) { /* ignore */ }
+        },
+        renderPlanBoard() {
+            const board = document.getElementById('planBoard');
+            const cardsEl = document.getElementById('planCards');
+            if (!board || !cardsEl) return;
+            const pending = this.getPlans().filter((p) => p.status !== 'done');
+            const guide = document.getElementById('evalPageEmpty');
+            const view = this.getPlanView();
+            // 呈现方式切换按钮状态 + 班级下拉显隐（仅「按学员」需要）
+            const toggle = document.getElementById('planViewToggle');
+            if (toggle) toggle.querySelectorAll('.view-btn').forEach((b) => b.classList.toggle('active', b.dataset.planview === view));
+            const clsSel = document.getElementById('planStuClass');
+            if (clsSel) clsSel.style.display = view === 'student' ? '' : 'none';
+            // 看板头部（含 模板管理 / ＋新增）常显，空计划时只隐藏卡片区
+            if (!pending.length) {
+                cardsEl.style.display = 'none';
+                cardsEl.innerHTML = '';
+                if (clsSel) { clsSel.innerHTML = ''; clsSel.style.display = 'none'; }
+                if (guide) guide.style.display = 'block';
+                return;
+            }
+            cardsEl.style.display = 'flex';
+            if (guide) guide.style.display = 'none';
+            if (view === 'student') { this._renderPlanStudentView(pending, cardsEl); return; }
+            const esc = Shared.escapeHtml;
+            const escAttr = (s) => esc(String(s == null ? '' : s)).replace(/"/g, '&quot;');
+            const milestones = (p) => {
+                const sts = (p.studentIds || []).map((sid) => { const t = (p.tasks && p.tasks[sid]) || {}; return t; });
+                return { total: sts.length, fill: sts.filter((t) => t.fill).length, done: sts.filter((t) => t.fill && t.export).length };
+            };
+            let html = '';
+            pending.forEach((p) => {
+                const exp = this._expandedPlanId === p.id;
+                const m = milestones(p);
+                // 卡面只留最精简信息（图标 + 名称/数字），完整信息放 title
+                const tplLabel = p.templateLabel || '内置默认';
+                const wmLabel = p.wmTemplateKey ? (p.wmTemplateLabel || p.wmTemplateKey) : '';
+                const projCount = (p.projects && p.projects.length) ? p.projects.length : 0;
+                const metaTip = [
+                    `评估模板：${tplLabel}`,
+                    projCount ? `关联集训：${projCount} 个` : '',
+                    wmLabel ? `PDF 水印：${wmLabel}` : '',
+                ].filter(Boolean).join('　｜　');
+                html += `
+                <div class="plan-item${exp ? ' expanded' : ''}" data-id="${esc(p.id)}">
+                    <div class="plan-card" draggable="true" data-id="${esc(p.id)}">
+                        <span class="plan-drag" title="拖动排序">⠿</span>
+                        <div class="plan-card-main" data-id="${esc(p.id)}" title="点击展开 / 收起学员">
+                            <span class="plan-title">${exp ? '▾' : '▸'} ${esc(p.title || '（未命名）')}</span>
+                            <span class="plan-meta-wrap">
+                                <span class="plan-meta tpl" title="${escAttr(metaTip)}">🎯 ${esc(tplLabel)}${wmLabel ? ` · 💧 ${esc(wmLabel)}` : ''}</span>
+                                <span class="plan-meta prog" title="填写完成 / 学员总数 · 导出完成 / 学员总数">✍️ ${m.fill}/${m.total} · 📤 ${m.done}/${m.total}</span>
+                            </span>
+                        </div>
+                        <span class="plan-actions">
+                            <button type="button" class="btn btn-sm btn-outline" data-act="edit" data-id="${esc(p.id)}" title="编辑计划">✎</button>
+                            <button type="button" class="btn btn-sm btn-outline" data-act="del" data-id="${esc(p.id)}" title="删除计划">🗑</button>
+                        </span>
+                    </div>`;
+                if (exp) {
+                    html += `<div class="plan-students" data-pid="${esc(p.id)}">`;
+                    (p.studentIds || []).forEach((sid) => {
+                        const st = (Shared.data.students || []).find((x) => x.id === sid);
+                        const nm = st ? st.name : sid;
+                        const cls = st ? (Shared.getCurrentClassName ? Shared.getCurrentClassName(sid) : '') : '';
+                        const t = (p.tasks && p.tasks[sid]) || {};
+                        const fill = !!t.fill;
+                        const expD = !!t.export;
+                        const done = fill && expD;
+                        const stateTxt = done ? '✅ 已完成' : (fill ? '🖊 已填写，待导出' : '👤 待填写');
+                        html += `
+                        <div class="plan-stu-card${done ? ' done' : ''}" draggable="true" data-pid="${esc(p.id)}" data-sid="${esc(sid)}">
+                            <div class="ps-top">
+                                <span class="ps-avatar">${done ? '✅' : (fill ? '🖊' : '👤')}</span>
+                                <span class="ps-names">
+                                    <span class="ps-name">${esc(nm)}</span>
+                                    ${cls ? `<span class="ps-cls">${esc(cls)}</span>` : ''}
+                                </span>
+                                <span class="ps-drag" title="拖动排序">⠿</span>
+                            </div>
+                            <div class="ps-prog">
+                                <div class="ps-prog-head">
+                                    <span class="ps-state">${stateTxt}</span>
+                                    <span class="ps-count">${(fill ? 1 : 0) + (expD ? 1 : 0)}/2</span>
+                                </div>
+                                <div class="ps-nodes">
+                                    <span class="ps-node${fill ? ' done' : ''}">${fill ? '✓ ' : ''}填写</span>
+                                    <span class="ps-node${expD ? ' done' : ''}">${expD ? '✓ ' : ''}导出</span>
+                                </div>
+                                <div class="ps-bar">
+                                    <span class="ps-seg${fill ? ' done' : ''}"></span>
+                                    <span class="ps-seg${expD ? ' done' : ''}"></span>
+                                </div>
+                                <button type="button" class="btn btn-sm ps-open" data-open="1" data-mode="${fill ? 'preview' : 'edit'}" data-pid="${esc(p.id)}" data-sid="${esc(sid)}" title="${fill ? '已填写完成：直接预览 / 导出（只读，可在弹窗内切回「✍️ 填写」）' : '打开该学员的评估报告（填写 / 修改）'}">${fill ? '👁 预览导出' : '✍️ 进入填写'}</button>
+                            </div>
+                        </div>`;
+                    });
+                    html += '</div>';
+                }
+                html += '</div>';
+            });
+            cardsEl.innerHTML = html;
+        },
+
+        // ============ 内容呈现方式：按计划 / 按学员 ============
+        getPlanView() {
+            return this._planView === 'student' ? 'student' : 'plan';
+        },
+        setPlanView(mode) {
+            const v = mode === 'student' ? 'student' : 'plan';
+            if (this.getPlanView() === v) return;
+            this._planView = v;
+            this.renderPlanBoard();
+        },
+        // 按学员汇总（每名学员一条）：学员信息 + 计划内评估任务 + 历史报告存档
+        _planStudentRecords(pending) {
+            const archives = this.getIssuedReports();
+            const map = new Map();
+            (pending || []).forEach((p) => {
+                (p.studentIds || []).forEach((sid) => {
+                    if (!map.has(sid)) {
+                        const st = (Shared.data.students || []).find((x) => x.id === sid);
+                        const cid = Shared.getCurrentClassId ? Shared.getCurrentClassId(sid) : '';
+                        map.set(sid, {
+                            sid,
+                            name: st ? st.name : sid,
+                            clsId: cid || '',
+                            className: Shared.getCurrentClassName ? (Shared.getCurrentClassName(sid) || '') : '',
+                            tasks: [],
+                            archives: [],
+                        });
+                    }
+                    const t = (p.tasks && p.tasks[sid]) || {};
+                    const stamp = [t.fillAt, t.exportAt, p.createdAt]
+                        .map((x) => (x ? new Date(x).getTime() : 0))
+                        .filter((n) => n > 0);
+                    map.get(sid).tasks.push({
+                        pid: p.id,
+                        planTitle: p.title || '（未命名）',
+                        templateLabel: p.templateLabel || '内置默认',
+                        fill: !!t.fill,
+                        export: !!t.export,
+                        at: stamp.length ? Math.max(...stamp) : 0,
+                    });
+                });
+            });
+            const arr = [...map.values()];
+            arr.forEach((s) => {
+                s.archives = archives.filter((r) => r && r.studentId === s.sid);
+                s.finalCount = s.archives.filter((r) => this.isIssuedFinal(r)).length;
+                s.openCount = s.tasks.filter((t) => !t.fill).length;
+                s.total = s.tasks.length + s.archives.length;
+                const times = [
+                    ...s.tasks.map((t) => t.at),
+                    ...s.archives.map((r) => (r.savedAt ? new Date(r.savedAt).getTime() : 0)),
+                ].filter((n) => n > 0);
+                s.lastAt = times.length ? Math.max(...times) : 0;
+                // 三档分类：1 未填写；2 已完成填写但仍可修改（无存档 / 存在未定稿存档）；3 已完成且已定稿（不可修改）
+                if (s.openCount > 0) s.bucket = 1;
+                else if (s.archives.length && s.finalCount === s.archives.length) s.bucket = 3;
+                else s.bucket = 2;
+            });
+            return arr;
+        },
+        // 班级定位下拉：全部班级（含总人数）+ 有学员的班级 + 未分班
+        _renderPlanClassFilter(entries, selected) {
+            const sel = document.getElementById('planStuClass');
+            if (!sel) return '';
+            const known = new Set((Shared.data.classes || []).map((c) => c.id));
+            const counts = new Map();
+            entries.forEach((e) => {
+                const key = (e.clsId && known.has(e.clsId)) ? e.clsId : '';
+                counts.set(key, (counts.get(key) || 0) + 1);
+            });
+            const esc = Shared.escapeHtml;
+            let html = `<option value="">全部班级（${entries.length}）</option>`;
+            (Shared.data.classes || []).forEach((c) => {
+                const n = counts.get(c.id) || 0;
+                if (n) html += `<option value="${esc(c.id)}">${esc(c.name)}（${n}）</option>`;
+            });
+            if (counts.get('')) html += `<option value="__none__">未分班（${counts.get('')}）</option>`;
+            sel.innerHTML = html;
+            const want = selected || '';
+            sel.value = [...sel.options].some((o) => o.value === want) ? want : '';
+            return sel.value;
+        },
+        // 按学员呈现：三档分组（未填写 / 已完成可修改 / 已完成不可修改），档内按时间倒序
+        _renderPlanStudentView(pending, cardsEl) {
+            const esc = Shared.escapeHtml;
+            const all = this._planStudentRecords(pending);
+            const filterKey = this._renderPlanClassFilter(all, this._planStuFilter);
+            const known = new Set((Shared.data.classes || []).map((c) => c.id));
+            const shown = all.filter((s) => {
+                if (!filterKey) return true;
+                const key = (s.clsId && known.has(s.clsId)) ? s.clsId : '';
+                return filterKey === '__none__' ? !key : key === filterKey;
+            });
+            if (!shown.length) {
+                cardsEl.innerHTML = '<div class="plan-stu-view"><div class="plan-stu-view-empty">该班级下暂无待评估的学员</div></div>';
+                return;
+            }
+            const buckets = [
+                { key: 1, label: '👤 未填写', icon: '👤' },
+                { key: 2, label: '🖊 已完成填写 · 可修改', icon: '🖊' },
+                { key: 3, label: '🔒 已完成 · 不可修改', icon: '🔒' },
+            ];
+            let html = '<div class="plan-stu-view">';
+            buckets.forEach((b) => {
+                const list = shown.filter((s) => s.bucket === b.key).sort((x, y) => (x.name || '').localeCompare(y.name || '', 'zh'));
+                if (!list.length) return;
+                html += '<div class="plan-rec-sec">';
+                html += `<div class="plan-rec-head">${b.label} <span class="gcount">（${list.length}）</span></div>`;
+                html += '<div class="plan-stu-flat">';
+                list.forEach((s) => { html += this._planStuCardHtml(s); });
+                html += '</div></div>';
+            });
+            cardsEl.innerHTML = html + '</div>';
+        },
+        // 学员信息卡（按学员呈现用）：整卡可点，打开该学员的全部评估记录
+        _planStuCardHtml(s) {
+            const esc = Shared.escapeHtml;
+            const icon = s.bucket === 1 ? '👤' : (s.bucket === 2 ? '🖊' : '🔒');
+            const stateTxt = s.bucket === 1
+                ? `待填写 ${s.openCount} 项`
+                : (s.bucket === 2 ? '已完成填写 · 仍可修改' : '已完成 · 已定稿不可修改');
+            const cls = s.className ? `🏫 ${esc(s.className)}` : '🏫 未分班';
+            return `
+            <button type="button" class="plan-stu-card stu-card" data-rec-sid="${esc(s.sid)}" title="点击查看该学员的全部评估记录">
+                <div class="ps-top">
+                    <span class="ps-avatar">${icon}</span>
+                    <span class="ps-names">
+                        <span class="ps-name">${esc(s.name)}</span>
+                        <span class="ps-cls">${cls}</span>
+                    </span>
+                </div>
+                <div class="stu-meta">
+                    <span class="stu-count">现有评估 ${s.total} 条</span>
+                    <span class="stu-sub">计划 ${s.tasks.length} · 存档 ${s.archives.length}</span>
+                </div>
+                <div class="stu-state">${stateTxt}${s.lastAt ? ` · ${this._fmtRecTime(s.lastAt)}` : ''}</div>
+            </button>`;
+        },
+        // 时间戳（ms）→ yyyy-mm-dd hh:mm
+        _fmtRecTime(ms) {
+            const d = new Date(ms);
+            if (!ms || isNaN(d.getTime())) return '';
+            const pad = (n) => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        },
+        // 学员评估记录弹窗（计划内任务 + 历史报告存档）
+        openStuRecords(sid) {
+            this._stuRecordsSid = sid;
+            this._renderStuRecords();
+            const m = document.getElementById('stuRecordsModal');
+            if (m) m.classList.add('open');
+        },
+        closeStuRecords() {
+            const m = document.getElementById('stuRecordsModal');
+            if (m) m.classList.remove('open');
+            this._stuRecordsSid = null;
+        },
+        _renderStuRecords() {
+            const sid = this._stuRecordsSid;
+            const box = document.getElementById('stuRecordsList');
+            const title = document.getElementById('stuRecordsTitle');
+            if (!sid || !box) return;
+            const pending = this.getPlans().filter((p) => p.status !== 'done');
+            const s = this._planStudentRecords(pending).find((x) => x.sid === sid);
+            if (!s) { box.innerHTML = '<div class="rec-empty">未找到该学员的评估记录</div>'; return; }
+            const esc = Shared.escapeHtml;
+            if (title) title.textContent = `👤 ${s.name}${s.className ? ' · ' + s.className : ''} · 现有评估 ${s.total} 条`;
+            let html = '';
+            html += `<div class="rec-sec-title">📋 计划内评估任务（${s.tasks.length}）</div>`;
+            if (!s.tasks.length) html += '<div class="rec-empty">暂无计划内评估任务</div>';
+            s.tasks.slice().sort((a, b) => b.at - a.at).forEach((t) => {
+                const state = (t.fill && t.export) ? '✅ 已完成' : (t.fill ? '🖊 已填写，待导出' : '👤 未填写');
+                html += `<div class="rec-row">
+                    <span class="rec-main">
+                        <span class="rec-title">${esc(t.planTitle)}</span>
+                        <span class="rec-sub">🎯 模板：${esc(t.templateLabel)}${t.at ? ` · ${this._fmtRecTime(t.at)}` : ''}</span>
+                    </span>
+                    <span class="rec-state">${state}</span>
+                    <button type="button" class="btn btn-sm btn-outline" data-rec-open="1" data-mode="${t.fill ? 'preview' : 'edit'}" data-pid="${esc(t.pid)}" data-sid="${esc(s.sid)}" title="${t.fill ? '已填写完成：直接预览 / 导出（只读）' : '打开该学员的评估报告（填写 / 修改）'}">${t.fill ? '👁 预览导出' : '✍️ 进入填写'}</button>
+                </div>`;
+            });
+            html += `<div class="rec-sec-title">🗂 历史报告存档（${s.archives.length}）</div>`;
+            if (!s.archives.length) html += '<div class="rec-empty">暂无历史报告存档</div>';
+            s.archives.slice().sort((a, b) => String(b.savedAt || '').localeCompare(String(a.savedAt || ''))).forEach((r) => {
+                const final = this.isIssuedFinal(r);
+                html += `<div class="rec-row">
+                    <span class="rec-main">
+                        <span class="rec-title">${esc(r.title || '训练评估报告')}</span>
+                        <span class="rec-sub">报告日期 ${esc(r.date || '—')} · 出具 ${r.savedAt ? this._fmtRecTime(new Date(r.savedAt).getTime()) : '—'} · 🎯 ${esc(r.quantTemplateLabel || '—')}</span>
+                    </span>
+                    <span class="rec-state">${final ? '🔒 定稿·不可修改' : '已存档·可修改'}</span>
+                    <button type="button" class="btn btn-sm btn-outline" data-rec-view="${esc(r.id)}" title="回看该存档（只读）">👁 查看</button>
+                    <button type="button" class="btn btn-sm btn-outline" data-rec-del="${esc(r.id)}" title="${final ? '定稿报告不可删除' : '删除该存档'}" ${final ? 'disabled' : ''} style="${final ? 'opacity:0.45;cursor:not-allowed;' : ''}">🗑</button>
+                </div>`;
+            });
+            box.innerHTML = html;
+        },
+        openPlanModal(editId) {
+            const m = document.getElementById('planModal');
+            const titleEl = document.getElementById('planModalTitle');
+            const t = document.getElementById('planTitle');
+            this._planEditId = editId || null;
+            if (titleEl) titleEl.textContent = editId ? '✎ 编辑评估计划' : '＋ 新增评估计划';
+            let checked = [];
+            let tplKey = '__default__';
+            let wmKey = '';
+            if (editId) {
+                const p = this.getPlans().find((x) => x.id === editId);
+                if (p) {
+                    if (t) t.value = p.title || '';
+                    checked = p.studentIds || [];
+                    tplKey = p.templateKey || '__default__';
+                    wmKey = p.wmTemplateKey || '';
+                }
+            } else if (t) t.value = '';
+            this._planSel = checked.slice();
+            this._planClass = null;
+            this._initPlanPicker();
+            const tplSel = document.getElementById('planTpl');
+            if (tplSel) this._fillTemplateOptions(tplSel, tplKey);
+            // PDF 水印模板（''=沿用当前设置）
+            this._fillWatermarkTplOptions(document.getElementById('planWmTpl'), wmKey);
+            this._updatePlanProjInfo();
+            if (m) m.classList.add('open');
+            if (t) t.focus();
+        },
+        // 某“班级键”下的学员（键=classId；空串=未分班）
+        _classStudents(key) {
+            const known = new Set((Shared.data.classes || []).map((c) => c.id));
+            return (Shared.data.students || []).filter((s) => {
+                const cid = Shared.getCurrentClassId ? Shared.getCurrentClassId(s.id) : null;
+                const assigned = !!cid && known.has(cid);
+                return key === '' ? !assigned : cid === key;
+            });
+        },
+        // 初始化三栏选择器（默认选中第一个有学员的班级）
+        _initPlanPicker() {
+            if (this._planClass == null) {
+                const c0 = (Shared.data.classes || []).find((c) => this._classStudents(c.id).length);
+                const hasUngrouped = this._classStudents('').length > 0;
+                this._planClass = (c0 ? c0.id : '');
+                if (this._planClass === '' && !hasUngrouped) this._planClass = null;
+            }
+            this._renderPlanClassList();
+            this._renderPlanStudentList();
+            this._renderPlanSelectedList();
+        },
+        _renderPlanClassList() {
+            const box = document.getElementById('planClassList');
+            if (!box) return;
+            const esc = Shared.escapeHtml;
+            let items = '';
+            (Shared.data.classes || []).forEach((c) => {
+                const n = this._classStudents(c.id).length;
+                items += `<div class="plan-pick-item${this._planClass === c.id ? ' active' : ''}" data-cls="${esc(c.id)}">${esc(c.name)}<span class="cnt">${n}</span></div>`;
+            });
+            const u = this._classStudents('').length;
+            if (u) items += `<div class="plan-pick-item${this._planClass === '' ? ' active' : ''}" data-cls="">（未分班）<span class="cnt">${u}</span></div>`;
+            box.innerHTML = items || '<div style="padding:0.3rem;color:var(--gray-400);font-size:0.8rem;">暂无班级</div>';
+        },
+        _renderPlanStudentList() {
+            const box = document.getElementById('planStuList');
+            if (!box) return;
+            const esc = Shared.escapeHtml;
+            const arr = this._planClass == null ? [] : this._classStudents(this._planClass);
+            if (!arr.length) { box.innerHTML = '<div style="padding:0.3rem;color:var(--gray-400);font-size:0.8rem;">该班暂无学员</div>'; return; }
+            const sel = this._planSel || [];
+            box.innerHTML = arr.map((s) => {
+                const inSel = sel.includes(s.id);
+                return `<div class="plan-pick-item${inSel ? ' in' : ''}" data-sid="${esc(s.id)}">${inSel ? '☑' : '👤'} ${esc(s.name)}${inSel ? '<span style="margin-left:auto;font-size:0.72rem;color:#15803d;">已选</span>' : '<span class="plus">＋</span>'}</div>`;
+            }).join('');
+        },
+        _renderPlanSelectedList() {
+            const box = document.getElementById('planSelList');
+            const cntEl = document.getElementById('planSelCount');
+            if (!box) return;
+            const sel = this._planSel || [];
+            if (cntEl) cntEl.textContent = sel.length ? `（${sel.length}）` : '';
+            if (!sel.length) { box.innerHTML = '<div style="padding:0.3rem;color:var(--gray-400);font-size:0.8rem;">点击左侧学员加入</div>'; return; }
+            const esc = Shared.escapeHtml;
+            box.innerHTML = sel.map((sid) => {
+                const st = (Shared.data.students || []).find((x) => x.id === sid);
+                return `<div class="plan-pick-item" data-sid="${esc(sid)}">👤 ${esc(st ? st.name : sid)}<span class="x">✕</span></div>`;
+            }).join('');
+        },
+        _planAddStudent(sid) {
+            if (!this._planSel) this._planSel = [];
+            if (!this._planSel.includes(sid)) this._planSel.push(sid);
+            this._renderPlanStudentList();
+            this._renderPlanSelectedList();
+        },
+        _planRemoveStudent(sid) {
+            this._planSel = (this._planSel || []).filter((x) => x !== sid);
+            this._renderPlanStudentList();
+            this._renderPlanSelectedList();
+        },
+        _updatePlanProjInfo() {
+            const sel = document.getElementById('planTpl');
+            const info = document.getElementById('planProjInfo');
+            if (!sel || !info) return;
+            const v = sel.value;
+            const proj = (v === '__default__') ? [] : this.templateProjects(v);
+            if (!proj.length) { info.textContent = ''; return; }
+            const labels = proj.map((x) => this.getScopeOptionLabel(x));
+            info.textContent = `带入集训：${labels.join('、')}`;
+        },
+        closePlanModal() {
+            const m = document.getElementById('planModal');
+            if (m) m.classList.remove('open');
+            this._planEditId = null;
+        },
+        savePlan() {
+            const title = ((document.getElementById('planTitle') || {}).value || '').trim();
+            const sids = (this._planSel || []).slice();
+            if (!sids.length) { this.toast('请至少选择一名学员', 'warning'); return; }
+            const tplSel = document.getElementById('planTpl');
+            const tplKey = tplSel ? tplSel.value : '__default__';
+            let tplLabel = '内置默认';
+            if (tplKey !== '__default__' && tplSel && tplSel.selectedIndex >= 0) {
+                tplLabel = (tplSel.options[tplSel.selectedIndex].text || tplKey).replace(/^★\s*/, '');
+            }
+            const projects = (tplKey === '__default__') ? [] : this.templateProjects(tplKey);
+            // PDF 水印模板（''=沿用当前设置）
+            const wmSel = document.getElementById('planWmTpl');
+            const wmKey = wmSel ? wmSel.value : '';
+            const wmOk = !!this.getWatermarkTemplates()[wmKey];
+            const finalTitle = title || `${sids.length} 名学员 · ${tplLabel}`;
+            const list = this.getPlans();
+            if (this._planEditId) {
+                const p = list.find((x) => x.id === this._planEditId);
+                if (p) {
+                    p.title = finalTitle;
+                    p.studentIds = sids;
+                    p.templateKey = tplKey;
+                    p.templateLabel = tplLabel;
+                    p.projects = projects;
+                    p.wmTemplateKey = wmOk ? wmKey : '';
+                    p.wmTemplateLabel = wmOk ? wmKey : '';
+                }
+            } else {
+                list.push({
+                    id: (Shared && Shared.generateId) ? Shared.generateId() : ('p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5)),
+                    title: finalTitle,
+                    studentIds: sids,
+                    templateKey: tplKey,
+                    templateLabel: tplLabel,
+                    projects,
+                    wmTemplateKey: wmOk ? wmKey : '',
+                    wmTemplateLabel: wmOk ? wmKey : '',
+                    status: 'todo',
+                    createdAt: new Date().toISOString(),
+                });
+            }
+            const newPlanId = (!this._planEditId && list.length) ? list[list.length - 1].id : null;
+            this.savePlans(list);
+            this.closePlanModal();
+            if (newPlanId) this._expandedPlanId = newPlanId;
+            this.renderPlanBoard();
+            this.toast('已保存评估计划');
+        },
+        // 学生 id → 姓名
+        studentNamesOf(ids) {
+            const set = new Set(ids || []);
+            return (Shared.data.students || []).filter((s) => set.has(s.id)).map((s) => s.name);
+        },
+        // 读取某学员已保存的量化结构（未保存返回 null）
+        studentSavedTemplate(sid) {
+            try {
+                const all = JSON.parse(localStorage.getItem('evalQuantTemplate') || '{}');
+                const s = all[sid];
+                return (s && s.length) ? s : null;
+            } catch (e) { return null; }
+        },
+        // 按模板键取结构副本（__default__ → 内置默认）
+        templateForKey(key) {
+            if (!key || key === '__default__') return this.defaultQuantTemplate();
+            const tpl = (this.getQuantStructTemplates() || {})[key];
+            return tpl ? JSON.parse(JSON.stringify(tpl)) : null;
+        },
+        // 一键批量生成：按计划给每位学员套模板 + 带入项目 + 生成并出具存档
+        planBatchRun(id) {
+            const plan = this.getPlans().find((p) => p.id === id);
+            if (!plan) return;
+            const sids = plan.studentIds || [];
+            const students = (Shared.data.students || []).filter((s) => sids.includes(s.id));
+            if (!students.length) { this.toast('该计划未包含学员', 'warning'); return; }
+            const key = plan.templateKey || '__default__';
+            const target = this.templateForKey(key);
+            if (!target || !target.length) { this.toast('所选模板不存在', 'warning'); return; }
+            const label = plan.templateLabel || '内置默认';
+            let replaceAny = false;
+            students.forEach((s) => {
+                const cur = this.studentSavedTemplate(s.id);
+                if (cur) { if (!this.quantTemplatesEqual(cur, target)) replaceAny = true; }
+                else if (!this.quantTemplatesEqual(target, this.defaultQuantTemplate())) replaceAny = true;
+            });
+            const msg = `为 ${students.length} 名学员按模板「${label}」批量生成并出具存档？${replaceAny ? '\n（部分学员现有结构与此模板不同，将替换其结构并清空原有分数）' : ''}`;
+            if (!confirm(msg)) return;
+            // 先带入计划的项目（自动带上所属集训）
+            if (plan.projects && plan.projects.length) this._applyScopeProjects(plan.projects);
+            let archived = 0;
+            let skipped = 0;
+            students.forEach((s) => {
+                this.selectedStudentId = s.id;
+                const cur = this.studentSavedTemplate(s.id);
+                if (!cur || !this.quantTemplatesEqual(cur, target)) {
+                    this._quantTemplate = JSON.parse(JSON.stringify(target));
+                    this.saveQuantTemplate(this._quantTemplate);
+                    this.saveQuantScores({});
+                    if (this.quantSubMode === 'edit') this._quantEditBaseline = JSON.parse(JSON.stringify(this.getQuantTemplate()));
+                }
+                this.generate();
+                const content = document.getElementById('evalContent');
+                const hasData = content && !content.querySelector('.empty-state');
+                if (!hasData) { skipped++; return; }
+                if (this.viewMode !== 'preview') this._applyViewMode('preview');
+                if (this.issueReport()) archived++; else skipped++;
+            });
+            if (this.viewMode !== 'edit') this._applyViewMode('edit');
+            // 已完成：从待办看板移除
+            this.savePlans(this.getPlans().filter((p) => p.id !== id));
+            this.renderPlanBoard();
+            if (archived) this.toast(`已完成：为 ${archived} 名学员出具并存档${skipped ? `（${skipped} 名暂无数据已跳过）` : ''}`);
+            else this.toast('未成功出具任何报告（学员可能暂无成绩数据）', 'warning');
+        },
+        planAct(id, act) {
+            if (act === 'expand') {
+                this._expandedPlanId = (this._expandedPlanId === id) ? null : id;
+                this.renderPlanBoard();
+                return;
+            }
+            if (act === 'del') {
+                if (!confirm('删除该评估计划？')) return;
+                this.savePlans(this.getPlans().filter((p) => p.id !== id));
+                this.renderPlanBoard();
+                this.toast('已删除');
+                return;
+            }
+            if (act === 'edit') { this.openPlanModal(id); return; }
+        },
+        // 读取某学员已保存分数
+        getStudentScores(sid) {
+            try { return JSON.parse(localStorage.getItem('evalQuantScores') || '{}')[sid] || {}; } catch (e) { return {}; }
+        },
+        // 进入学员报告：mode='edit'（填写，默认）/'preview'（已填写 → 直接预览导出）
+        openPlanStudent(planId, sid, mode) {
+            const plan = this.getPlans().find((p) => p.id === planId);
+            const student = (Shared.data.students || []).find((s) => s.id === sid);
+            if (!plan || !student) { this.toast('未找到计划或学员', 'warning'); return; }
+            const preview = mode === 'preview';
+            this.selectedStudentId = sid;
+            // 顶部学员/班级下拉同步
+            const cid = Shared.getCurrentClassId ? Shared.getCurrentClassId(sid) : null;
+            if (cid) {
+                this.selectedClassId = cid;
+                const clsSel = document.getElementById('evalClassSelect');
+                if (clsSel && Array.from(clsSel.options).some((o) => o.value === cid)) clsSel.value = cid;
+            }
+            const stuSel = document.getElementById('evalStudentSelect');
+            if (stuSel && !Array.from(stuSel.options).some((o) => o.value === sid)) {
+                const o = document.createElement('option');
+                o.value = sid; o.textContent = student.name;
+                stuSel.appendChild(o);
+            }
+            if (stuSel) stuSel.value = sid;
+            // 按计划模板处理结构（不同才替换；已有分数需确认）
+            const key = plan.templateKey || '__default__';
+            const target = this.templateForKey(key);
+            const label = plan.templateLabel || '内置默认';
+            const cur = this.studentSavedTemplate(sid);
+            const curT = cur ? JSON.parse(JSON.stringify(cur)) : this.defaultQuantTemplate();
+            if (target && target.length && !this.quantTemplatesEqual(curT, target)) {
+                const hasScores = Object.keys(this.getStudentScores(sid)).length > 0;
+                const ok = hasScores
+                    ? confirm(`为 ${student.name} 套用模板「${label}」并进入填写？现有结构不同，将替换并清空其分数。`)
+                    : true;
+                if (ok) {
+                    this._quantTemplate = JSON.parse(JSON.stringify(target));
+                    this.saveQuantTemplate(this._quantTemplate);
+                    this.saveQuantScores({});
+                    if (this.quantSubMode === 'edit') this._quantEditBaseline = JSON.parse(JSON.stringify(this.getQuantTemplate()));
+                }
+            }
+            // 套用计划指定的「报告元素模板」/「PDF 水印模板」（未指定则沿用当前全局设置）
+            this._applyPlanReportTemplates(plan);
+            // 带入计划模板关联项目；无关联项目的计划 → 范围重置为「全部」（避免沿用上一位学员收窄后的范围）
+            if (plan.projects && plan.projects.length) this._applyScopeProjects(plan.projects);
+            else this.initScope();
+            this.generate();
+            this._applyViewMode(preview ? 'preview' : 'edit'); // 已填写的直接进「导出预览」，否则进「填写」
+            // 记录本次填写会话：退出弹窗时对比快照，有改动就自动标记「填写」完成（仅填写模式）
+            this._fillPlanId = preview ? null : planId;
+            this._fillSid = preview ? null : sid;
+            this._fillBase = preview ? null : this._fillSnapshot(sid);
+            // 当前报告的计划上下文：打印 / 存档时自动标记「报告已导出」
+            this._curPlanId = planId;
+            this._curSid = sid;
+            // 打开报告填写弹窗（全屏可滚动）
+            const cname = (Shared.getCurrentClassName && Shared.getCurrentClassName(student.id)) || '';
+            this.openReportSheet(`${student.name || ''}${cname ? ' · ' + cname : ''}`);
+        },
+        reorderPlan(fromId, toId) {
+            if (!fromId || !toId || fromId === toId) return;
+            const list = this.getPlans();
+            const fromIdx = list.findIndex((p) => p.id === fromId);
+            const toIdx = list.findIndex((p) => p.id === toId);
+            if (fromIdx < 0 || toIdx < 0) return;
+            const [item] = list.splice(fromIdx, 1);
+            list.splice(toIdx, 0, item);
+            this.savePlans(list);
+            this.renderPlanBoard();
+        },
+        // —— 学员任务里程碑（①数据填写 ②报告导出）：全程自动标记，不可手点 ——
+        _planTask(p, sid) {
+            if (!p.tasks) p.tasks = {};
+            if (!p.tasks[sid]) p.tasks[sid] = { fill: false, export: false };
+            return p.tasks[sid];
+        },
+        // 自动记进度：mil=fill（进入填写并改动）/ export（打印或存档报告）
+        _markPlanTask(pid, sid, mil) {
+            if (!pid || !sid) return false;
+            const list = this.getPlans();
+            const p = list.find((x) => x.id === pid);
+            if (!p || !(p.studentIds || []).includes(sid)) return false;
+            const t = this._planTask(p, sid);
+            const now = new Date().toISOString();
+            if (mil === 'fill') {
+                if (t.fill) return false;
+                t.fill = true;
+                t.fillAt = now;
+            } else if (mil === 'export') {
+                if (t.export) return false;
+                if (!t.fill) { t.fill = true; t.fillAt = t.fillAt || now; }
+                t.export = true;
+                t.exportAt = now;
+            } else {
+                return false;
+            }
+            const allDone = (p.studentIds || []).length > 0 && (p.studentIds || []).every((s) => { const tt = this._planTask(p, s); return tt.fill && tt.export; });
+            if (allDone) {
+                this.savePlans(list.filter((x) => x.id !== p.id));
+                this.toast(`计划「${p.title || ''}」全部学员任务完成 🎉`);
+            } else {
+                this.savePlans(list);
+            }
+            return true;
+        },
+        // 当前正在填写的（计划, 学员）上下文：用于导出/存档时自动标记「报告已导出」
+        _markCurrentReportExported() {
+            const ok = this._markPlanTask(this._curPlanId, this._curSid, 'export');
+            if (ok) {
+                const st = (Shared.data.students || []).find((s) => s.id === this._curSid);
+                this.toast(`已记录 ${st ? st.name : '该学员'} 的报告已导出`);
+            }
+        },
+        // 学员卡片拖动排序（同一计划内）
+        reorderPlanStudents(planId, fromSid, toSid) {
+            if (!fromSid || !toSid || fromSid === toSid) return;
+            const list = this.getPlans();
+            const p = list.find((x) => x.id === planId);
+            if (!p || !Array.isArray(p.studentIds)) return;
+            const fromIdx = p.studentIds.indexOf(fromSid);
+            const toIdx = p.studentIds.indexOf(toSid);
+            if (fromIdx < 0 || toIdx < 0) return;
+            const [it] = p.studentIds.splice(fromIdx, 1);
+            p.studentIds.splice(toIdx, 0, it);
+            this.savePlans(list);
+            this.renderPlanBoard();
+        },
+
+        // ============ 评估模板管理（量化结构 / 模板元素编辑 / PDF 水印） ============
+        openTplMgmtModal() {
+            this.renderTplMgmt();
+            this.loadWatermarkModal(); // 装载当前水印设置到「🖨 PDF 水印」标签页
+            const m = document.getElementById('tplMgmtModal');
+            if (m) m.classList.add('open');
+        },
+        closeTplMgmtModal() {
+            const m = document.getElementById('tplMgmtModal');
+            if (m) m.classList.remove('open');
+        },
+        renderTplMgmt() {
+            const box = document.getElementById('tplMgmtList');
+            if (!box) return;
+            const tpls = this.getQuantStructTemplates() || {};
+            const dl = this.getDefaultLoadName();
+            const refs = this.referencedTemplateNames();
+            const meta = this.getTemplateMeta();
+            const names = Object.keys(tpls).filter((n) => !this.isReservedStructName(n));
+            let html = `<div class="tpl-mgmt-row tpl-system">
+                <button type="button" class="tpl-star${dl === '' ? ' on' : ''}" data-act="setdef" data-id="__default__" title="${dl === '' ? '当前默认：新学员初始使用该模板' : '设为默认（点击恢复为「内置默认」）'}">${dl === '' ? '★' : '☆'}</button>
+                <span style="flex:1;color:var(--gray-500);font-size:0.82rem;">内置默认</span>
+                <span style="flex:none;display:flex;gap:0.3rem;">
+                    <button type="button" class="btn btn-sm btn-outline" data-act="view" data-id="__default__" title="预览内置默认模板（系统内置，只读不可编辑）">👁 预览</button>
+                </span>
+            </div>`;
+            if (!names.length) html += '<div class="tpl-mgmt-empty">暂无用户模板</div>';
+            else {
+                names.forEach((n) => {
+                    const isDef = n === dl;
+                    const refd = !!refs[n];
+                    const proj = (meta[n] && meta[n].projects && meta[n].projects.length) ? meta[n].projects : [];
+                    html += `<div class="tpl-mgmt-row" data-name="${Shared.escapeHtml(n)}">
+                        <button type="button" class="tpl-star${isDef ? ' on' : ''}" data-act="setdef" data-id="${Shared.escapeHtml(n)}" title="${isDef ? '当前默认：新学员初始使用该模板' : '设为默认：新学员初始使用该模板'}">${isDef ? '★' : '☆'}</button>
+                        <span style="flex:1;min-width:120px;font-size:0.9rem;font-weight:600;color:var(--gray-800);">${Shared.escapeHtml(n)}${proj.length ? ` <span style="font-weight:400;font-size:0.72rem;color:var(--primary);">🎯 ${proj.length} 集训</span>` : ''}</span>
+                        <span style="flex:none;display:flex;gap:0.3rem;flex-wrap:wrap;">
+                            <button type="button" class="btn btn-sm btn-outline" data-act="view" data-id="${Shared.escapeHtml(n)}" title="预览模板（只读）">👁</button>
+                            <button type="button" class="btn btn-sm btn-outline" data-act="edit" data-id="${Shared.escapeHtml(n)}" title="编辑评估模板（量化结构 + 报告元素）">✎</button>
+                            <button type="button" class="btn btn-sm btn-outline" data-act="proj" data-id="${Shared.escapeHtml(n)}" title="设置/修改关联集训">🎯 关联</button>
+                            <button type="button" class="btn btn-sm btn-outline" data-act="del" data-id="${Shared.escapeHtml(n)}" ${refd ? 'disabled' : ''} title="${refd ? '已被历史报告引用，只读不可删除' : '删除该模板'}" style="${refd ? 'opacity:.45;cursor:not-allowed;' : ''}">🗑</button>
+                        </span>
+                    </div>`;
+                });
+            }
+            box.innerHTML = html;
+        },
+        // 打开“关联项目”编辑器
+        tplProjEdit(name) {
+            this._tplProjName = name;
+            const editor = document.getElementById('tplProjEditor');
+            const nameEl = document.getElementById('tplProjName');
+            if (nameEl) nameEl.textContent = name;
+            const listEl = document.getElementById('tplProjList');
+            const trainings = Shared.data.trainings || [];
+            const cur = this.templateProjects(name);
+            if (listEl) {
+                listEl.innerHTML = trainings.length
+                    ? trainings.map((t) => {
+                        const pc = (t.practiceRecords || []).length;
+                        const mc = (t.mockCompetitions || []).length;
+                        const meta = (pc || mc) ? `（练习 ${pc} · 赛项 ${mc}）` : '';
+                        return `<label><input type="checkbox" value="${Shared.escapeHtml(t.id)}"${cur.includes(t.id) ? ' checked' : ''} /> ${Shared.escapeHtml(t.name || '（未命名集训）')}${meta ? ` <span style="color:var(--gray-400);font-weight:400;">${meta}</span>` : ''}</label>`;
+                    }).join('')
+                    : '<span style="font-size:0.85rem;color:var(--gray-400);">暂无可用集训</span>';
+            }
+            if (editor) editor.style.display = 'block';
+        },
+        tplProjSave() {
+            const name = this._tplProjName;
+            if (!name) return;
+            const ids = Array.from(document.querySelectorAll('#tplProjList input[type="checkbox"]:checked')).map((c) => c.value);
+            this.setTemplateProjects(name, ids);
+            this._tplProjName = null;
+            const editor = document.getElementById('tplProjEditor');
+            if (editor) editor.style.display = 'none';
+            this.renderTplMgmt();
+            this.toast(ids.length ? `已保存模板「${name}」关联 ${ids.length} 个项目` : `已清除模板「${name}」的项目关联`);
+        },
+        tplProjClear() {
+            const name = this._tplProjName;
+            if (!name) return;
+            this.setTemplateProjects(name, []);
+            this.tplProjEdit(name); // 刷新勾选为空
+            this.toast(`已清除模板「${name}」的项目关联`);
+        },
+        tplProjCancel() {
+            this._tplProjName = null;
+            const editor = document.getElementById('tplProjEditor');
+            if (editor) editor.style.display = 'none';
+        },
+        tplMgmtAct(name, act) {
+            const tpls = this.getQuantStructTemplates() || {};
+            if (act === 'setdef') {
+                // 点条目名前的 ☆/★：把该模板设为默认；内置默认行(id='__default__') → 恢复为「内置默认」
+                const target = name === '__default__' ? '' : name;
+                if (target && !tpls[target]) { this.toast('模板不存在', 'warning'); return; }
+                if ((this.getDefaultLoadName() || '') === target) {
+                    this.toast(target ? `「${target}」已是默认模板` : '当前已是「内置默认」', 'warning');
+                    return;
+                }
+                this.setDefaultLoadName(target);
+                this.renderTplMgmt();
+                if (document.getElementById('quantStructTpl')) this.refreshQuantStructSelect('');
+                else this.populateTemplateChoiceSelect();
+                this.toast(target ? `已将「${target}」设为默认加载模板（新学员初始使用）` : '已恢复为「内置默认」模板');
+                return;
+            }
+            if (!tpls[name] && name !== '__default__') { this.toast('模板不存在', 'warning'); return; }
+            if (name === '__default__' && act !== 'view' && act !== 'setdef') {
+                this.toast('内置默认为系统模板，只读不可编辑', 'warning');
+                return;
+            }
+            if (act === 'view') { this.openTplPreview(name); return; }
+            if (act === 'proj') { this.tplProjEdit(name); return; }
+            if (act === 'edit') { this.openTplEditModal(name); return; }
+            if (act === 'del') {
+                if (this.templateReferenced(name)) { this.toast(`模板「${name}」已被历史报告引用，只读不可删除`, 'warning'); return; }
+                if (!confirm(`删除用户模板「${name}」？`)) return;
+                this.deleteStructureTemplate(name);
+                this.renderTplMgmt();
+                if (document.getElementById('quantStructTpl')) this.refreshQuantStructSelect('');
+                else this.populateTemplateChoiceSelect();
+                this.toast('已删除模板');
+            }
+        },
+        tplMgmtShowNew(show) {
+            const row = document.getElementById('tplMgmtNewRow');
+            const inp = document.getElementById('tplMgmtNewName');
+            if (row) row.style.display = (show === false) ? 'none' : 'flex';
+            if (inp && show !== false) inp.focus();
+        },
+        tplMgmtSaveNew() {
+            const inp = document.getElementById('tplMgmtNewName');
+            const name = inp ? inp.value.trim() : '';
+            if (!name) { this.toast('请输入模板名称', 'warning'); if (inp) inp.focus(); return; }
+            if (this.isReservedStructName(name)) {
+                this.toast('「默认/default」为系统内置模板，用户模板不能占用该名称', 'warning');
+                if (inp) { inp.value = ''; inp.focus(); }
+                return;
+            }
+            const exists = !!this.getQuantStructTemplates()[name];
+            if (exists && !this.assertTemplateWritable(name)) return; // 被出具报告引用则不可同名覆盖
+            this.saveStructureTemplate(name, this.currentQuantTemplate());
+            // 新模板同时带入当前报告元素（页面标题 / 教练 / 日期 / AI 提示词与数据说明）
+            this.saveTemplateElements(name, this.getReportElements());
+            if (inp) inp.value = '';
+            this.tplMgmtShowNew(false);
+            this.renderTplMgmt();
+            if (document.getElementById('quantStructTpl')) this.refreshQuantStructSelect(name);
+            else this.populateTemplateChoiceSelect();
+            this.toast(`已保存模板「${name}」`);
+        },
+        // —— 评估模板：预览 / 编辑 双模式（同一弹窗；内置默认仅元素可编辑）——
+        openTplPreview(key, mode) {
+            const name = key || '__default__';
+            const wantEdit = mode === 'edit';
+            const tpls = this.getQuantStructTemplates() || {};
+            const isDefault = (name === '__default__');
+            if (!isDefault && !tpls[name]) { this.toast('模板不存在', 'warning'); return; }
+            // 内置默认＝系统模板：只读，任何入口的编辑请求都回落预览
+            if (isDefault && wantEdit) this.toast('内置默认为系统模板，只读不可编辑；如需自定义请「＋ 以当前结构新建模板」', 'warning');
+            this._tplPreviewKey = name;
+            const m = document.getElementById('tplPreviewModal');
+            if (m) m.classList.add('open');
+            if (wantEdit && !isDefault) return this._renderTplEditMode(name);
+            return this._renderTplPreviewMode(name);
+        },
+        // 预览模式（只读表 + 统计信息）
+        _renderTplPreviewMode(name) {
+            const key = name || '__default__';
+            const tpl = (key === '__default__') ? this.defaultQuantTemplate() : (this.getQuantStructTemplates()[key] || null);
+            if (!tpl) { this.toast('模板不存在', 'warning'); return; }
+            // 退出编辑态
+            this._tplEditCtx = false;
+            this._quantContainer = null;
+            this._tplEditName = null;
+            this._quantTemplate = null;
+            const title = document.getElementById('tplPreviewTitle');
+            if (title) title.textContent = '👁 预览模板：' + (key === '__default__' ? '内置默认' : key);
+            let dims = 0;
+            let subs = 0;
+            let crits = 0;
+            let refSum = 0;
+            (tpl || []).forEach((d) => {
+                dims += 1;
+                (d.subs || []).forEach((s) => {
+                    subs += 1;
+                    (s.criteria || []).forEach((c) => { crits += 1; refSum += (c.ref != null ? (Number(c.ref) || 0) : 0); });
+                });
+            });
+            const meta = document.getElementById('tplPreviewMeta');
+            if (meta) {
+                const bits = [`维度 ${dims}`, `子维度 ${subs}`, `评价细则 ${crits}`, `参考总分 ${refSum}`];
+                const el = this.getTemplateElements(key);
+                bits.push(`标题「${el.title || '训练评估报告'}」`);
+                if (el.coach) bits.push(`教练 ${el.coach}`);
+                if (key === '__default__') bits.push('系统内置（只读不可编辑）');
+                if ((this.getDefaultLoadName() || '') === (key === '__default__' ? '' : key)) bits.push('★ 当前默认加载');
+                if (key !== '__default__' && this.templateReferenced(key)) bits.push('已被历史报告引用（结构只读）');
+                meta.textContent = bits.join(' · ');
+            }
+            const body = document.getElementById('tplPreviewBody');
+            if (body) body.innerHTML = this._quantPreviewHtml(tpl);
+            const elemBox = document.getElementById('tplPreviewElemBox');
+            if (elemBox) elemBox.style.display = 'none';
+            const m = document.getElementById('tplPreviewModal');
+            if (m) m.classList.remove('edit-mode');
+            const foot = document.getElementById('tplPreviewEditFoot');
+            if (foot) foot.style.display = 'none';
+            const closeRow = document.getElementById('tplPreviewCloseRow');
+            if (closeRow) closeRow.style.display = '';
+            this._setTplPreviewMode('preview', key);
+        },
+        // 编辑模式（结构 + 报告元素；仅用户模板可用，内置默认只读）
+        _renderTplEditMode(name) {
+            const key = name || '__default__';
+            // 内置默认：系统模板，无编辑入口（双保险：即使被调用也回落预览）
+            if (key === '__default__') return this._renderTplPreviewMode(key);
+            const tpls = this.getQuantStructTemplates() || {};
+            if (!tpls[key] || this.isReservedStructName(key)) { this.toast('模板不存在或不可编辑', 'warning'); return; }
+            this._tplEditName = key;
+            this._tplEditCtx = true;
+            const title = document.getElementById('tplPreviewTitle');
+            const meta = document.getElementById('tplPreviewMeta');
+            const saveBtn = document.getElementById('tplEditSave');
+            const newNameEl = document.getElementById('tplEditNewName');
+            const body = document.getElementById('tplPreviewBody');
+            if (newNameEl) newNameEl.value = '';
+            this._quantContainer = body;
+            this._quantTemplate = JSON.parse(JSON.stringify(tpls[key] || []));
+            if (title) title.textContent = '✎ 编辑评估模板：' + key;
+            const refd = this.templateReferenced(key);
+            if (meta) meta.textContent = refd
+                ? '结构与报告元素一起保存；该模板结构已被历史报告引用（结构只读，仅保存报告元素），如需改结构请「另存为新模板」。'
+                : '结构与报告元素一起保存；可改名 / 增删 维度、子维度、评价细则与参考评分。';
+            if (saveBtn) { saveBtn.disabled = false; saveBtn.title = refd ? '结构只读（被历史报告引用），保存报告元素' : '保存结构与报告元素到该模板'; }
+            this._fillEditElemFields(key);
+            const elemBox = document.getElementById('tplPreviewElemBox');
+            if (elemBox) elemBox.style.display = '';
+            const m = document.getElementById('tplPreviewModal');
+            if (m) m.classList.add('edit-mode');
+            const foot = document.getElementById('tplPreviewEditFoot');
+            if (foot) foot.style.display = 'flex';
+            const closeRow = document.getElementById('tplPreviewCloseRow');
+            if (closeRow) closeRow.style.display = 'none';
+            this._setTplPreviewMode('edit', key);
+            this.initQuantTable();
+            this._tplEditCtx = true; // initQuantTable 内不改 _tplEditCtx，此处保险重申
+        },
+        // 同步顶部模式切换按钮
+        _setTplPreviewMode(mode, key) {
+            const toggle = document.getElementById('tplPreviewToggle');
+            if (!toggle) return;
+            const isDefault = (key || '__default__') === '__default__';
+            toggle.querySelectorAll('.view-btn').forEach((b) => {
+                b.classList.toggle('active', b.dataset.tplmode === mode);
+                if (b.dataset.tplmode === 'edit') {
+                    // 内置默认为系统模板：编辑入口禁用
+                    b.disabled = isDefault;
+                    b.style.opacity = isDefault ? '.45' : '';
+                    b.style.cursor = isDefault ? 'not-allowed' : '';
+                    b.title = isDefault ? '内置默认为系统模板，只读不可编辑' : '编辑评估模板（量化结构 + 报告元素）';
+                }
+            });
+        },
+        setTplPreviewMode(mode) {
+            const key = this._tplPreviewKey || '__default__';
+            if (mode === 'edit') this._renderTplEditMode(key);
+            else this._renderTplPreviewMode(key);
+        },
+        closeTplPreview() {
+            const m = document.getElementById('tplPreviewModal');
+            if (m) { m.classList.remove('open'); m.classList.remove('edit-mode'); }
+            this._tplEditCtx = false;
+            this._quantContainer = null;
+            this._tplEditName = null;
+            this._quantTemplate = null;
+            this._tplPreviewKey = null;
+        },
+        // 只读结构表（与报告内量化表同款样式：竖排维度/子维度 + 评价细则 + 参考评分，无输入框、无得分列）
+        _quantPreviewHtml(tpl) {
+            const esc = Shared.escapeHtml;
+            const vtext = 'writing-mode:vertical-rl;text-orientation:upright;font-size:0.85rem;line-height:1.05;color:#000;';
+            const dimW = 30;
+            const subW = 30;
+            let rows = '';
+            (tpl || []).forEach((dim, di) => {
+                const main = this.dimHex(dim, di);
+                const rowBg = this.dimRow(main);
+                let critCount = 0;
+                (dim.subs || []).forEach((s) => { critCount += (s.criteria || []).length; });
+                const dimRowspan = Math.max(1, critCount);
+                let firstDim = true;
+                (dim.subs || []).forEach((s) => {
+                    const list = (s.criteria || []).length ? s.criteria : [{ name: '', ref: null }];
+                    let firstSub = true;
+                    list.forEach((c) => {
+                        rows += `<tr style="background:${rowBg};">`
+                            + (firstDim ? `<td class="qdim" rowspan="${dimRowspan}" style="width:${dimW}px;min-width:${dimW}px;max-width:${dimW}px;text-align:center;vertical-align:middle;background:${rowBg};"><span style="${vtext}">${esc(dim.dim || '')}</span></td>` : '')
+                            + (firstSub ? `<td class="qsub" rowspan="${list.length}" style="width:${subW}px;min-width:${subW}px;max-width:${subW}px;text-align:center;vertical-align:middle;background:${rowBg};"><span style="${vtext}">${esc(s.sub || '')}</span></td>` : '')
+                            + `<td style="color:var(--gray-700);">${c.name ? this.renderCriteriaText(c.name) : '—'}</td>`
+                            + `<td style="text-align:center;color:var(--gray-600);">${c.ref != null ? this.intRef(c.ref) : '—'}</td>`
+                            + `</tr>`;
+                        firstDim = false;
+                        firstSub = false;
+                    });
+                });
+            });
+            return `<div style="overflow-x:auto;"><table class="score-table quant-table">
+                <thead><tr>
+                    <th colspan="2" style="white-space:nowrap;text-align:center;font-size:0.72rem;padding:0.4rem 0.1rem;">评测维度</th>
+                    <th>评价细则</th>
+                    <th style="width:76px;text-align:center;">参考评分</th>
+                </tr></thead>
+                <tbody>${rows || '<tr><td colspan="4" style="text-align:center;color:var(--gray-400);">（空模板）</td></tr>'}</tbody>
+            </table></div>`;
+        },
+        // 打开模板编辑（列表 ✎）：直接以「编辑」模式打开模板窗
+        openTplEditModal(name) {
+            this.openTplPreview(name, 'edit');
+        },
+        // 退出编辑态：丢弃改动，回到该模板的预览模式（弹窗不关）
+        closeTplEditModal() {
+            const key = this._tplPreviewKey || this._tplEditName || '__default__';
+            this._renderTplPreviewMode(key);
+        },
+        // 保存当前编辑的评估模板（被引用模板：结构只读，只保存报告元素）
+        tplEditSaveOriginal() {
+            if (!this._tplEditCtx || !this._tplEditName) return;
+            const name = this._tplEditName;
+            if (name === '__default__') { this.toast('内置默认为系统模板，只读不可编辑', 'warning'); return; }
+            const structReadonly = this.templateReferenced(name);
+            if (!structReadonly) {
+                this.saveStructureTemplate(name, JSON.parse(JSON.stringify(this._quantTemplate || [])));
+            }
+            this.saveTemplateElements(name, this.collectEditElements());
+            this.closeTplEditModal();
+            this.renderTplMgmt();
+            if (document.getElementById('quantStructTpl')) this.refreshQuantStructSelect(name);
+            else this.populateTemplateChoiceSelect();
+            this.toast(`已保存评估模板「${name}」`);
+        },
+        tplEditSaveNew() {
+            if (!this._tplEditCtx) return;
+            const inp = document.getElementById('tplEditNewName');
+            const name = inp ? inp.value.trim() : '';
+            if (!name) { this.toast('请输入新模板名称', 'warning'); if (inp) inp.focus(); return; }
+            if (this.isReservedStructName(name)) {
+                this.toast('「默认/default」为系统内置模板，不能占用该名称', 'warning');
+                if (inp) { inp.value = ''; inp.focus(); }
+                return;
+            }
+            const exists = !!this.getQuantStructTemplates()[name];
+            if (exists && !this.assertTemplateWritable(name)) return;
+            const struct = (this._quantTemplate && this._quantTemplate.length) ? this._quantTemplate : this.defaultQuantTemplate();
+            this.saveStructureTemplate(name, JSON.parse(JSON.stringify(struct)));
+            this.saveTemplateElements(name, this.collectEditElements());
+            this.closeTplEditModal();
+            this.renderTplMgmt();
+            if (document.getElementById('quantStructTpl')) this.refreshQuantStructSelect(name);
+            else this.populateTemplateChoiceSelect();
+            this.toast(`已另存为新模板「${name}」`);
         },
 
         // ============ 学员两级导航（班级 → 学员） ============
@@ -323,47 +1727,9 @@
                     btn.addEventListener('click', () => this.setViewMode(btn.dataset.view));
                 });
             }
-            // 班级变化 → 重建学员列表
-            const clsSel = document.getElementById('evalClassSelect');
-            if (clsSel) clsSel.addEventListener('change', () => {
-                this.selectedClassId = clsSel.value;
-                this.selectedStudentId = null;
-                this.populateStudentSelect();
-                if (this.selectedStudentId && this.selectedTrainingIds.length > 0) this.generate();
-                else this.showEmpty('请选择学员与集训，生成评估报告');
-            });
-            // 学员变化 → 生成
-            const stuSel = document.getElementById('evalStudentSelect');
-            if (stuSel) stuSel.addEventListener('change', () => {
-                this.selectedStudentId = stuSel.value || null;
-                if (this.selectedStudentId && this.selectedTrainingIds.length > 0) this.generate();
-                else this.showEmpty('请选择学员与集训，生成评估报告');
-            });
-            // 生成按钮（生成后滚动到报告，便于立即查看 / 导出）
-            const genBtn = document.getElementById('evalGenerateBtn');
-            if (genBtn) genBtn.addEventListener('click', () => {
-                if (!this.selectedStudentId) { this.toast('请先选择学员', 'warning'); return; }
-                if (this.selectedTrainingIds.length === 0) { this.toast('请至少选择一个集训', 'warning'); return; }
-                this.generate();
-                this.toast('已生成评估报告');
-                const evalContent = document.getElementById('evalContent');
-                if (evalContent) evalContent.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            });
             // 导出 PDF（浏览器打印，可另存为 PDF）
             const printBtn = document.getElementById('evalPrintBtn');
-            if (printBtn) printBtn.addEventListener('click', () => window.print());
-            // 编辑报告页面元素（标题 / 学员信息）
-            const headerEditBtn = document.getElementById('evalHeaderEditBtn');
-            if (headerEditBtn) headerEditBtn.addEventListener('click', () => this.openReportHeaderModal());
-            const rhSave = document.getElementById('reportHeaderSave');
-            if (rhSave) rhSave.addEventListener('click', () => this.saveReportHeaderModal());
-            const rhCancel = document.getElementById('reportHeaderCancel');
-            if (rhCancel) rhCancel.addEventListener('click', () => {
-                const modal = document.getElementById('reportHeaderModal');
-                if (modal) modal.classList.remove('open');
-            });
-            const rhModal = document.getElementById('reportHeaderModal');
-            if (rhModal) rhModal.addEventListener('click', (e) => { if (e.target === rhModal) rhModal.classList.remove('open'); });
+            if (printBtn) printBtn.addEventListener('click', () => this.guardQuantEditExit(() => { window.print(); this._markCurrentReportExported(); }));
             // 水印模板（用户自定义）：下拉套用 / 存为模板 / 删除
             const wmTp = document.getElementById('wmTemplate');
             if (wmTp) wmTp.addEventListener('change', () => {
@@ -403,6 +1769,9 @@
                 this.refreshWatermarkTemplateSelect('');
                 this.toast('已删除模板');
             });
+            // 「🖨 PDF 水印」标签页：保存水印设置（全局，不依赖学员）
+            const wmSaveBtn = document.getElementById('wmSaveBtn');
+            if (wmSaveBtn) wmSaveBtn.addEventListener('click', () => this.saveWatermarkFromTab());
             // AI 生成教练评语（aiCommentBtn 为动态创建，在 generate() 内绑定；此处绑定弹窗内静态元素）
             const aiModal = document.getElementById('aiCommentModal');
             if (aiModal) aiModal.addEventListener('click', (e) => { if (e.target === aiModal) aiModal.classList.remove('open'); });
@@ -425,6 +1794,263 @@
             if (qSubCancel) qSubCancel.addEventListener('click', () => { const m = document.getElementById('quantAddSubModal'); if (m) m.classList.remove('open'); });
             const qSubConfirm = document.getElementById('quantAddSubConfirm');
             if (qSubConfirm) qSubConfirm.addEventListener('click', () => this.confirmQuantAddSub());
+            // 量化结构编辑退出弹窗（静态，绑定一次）
+            const qExitModal = document.getElementById('quantEditExitModal');
+            if (qExitModal) {
+                qExitModal.addEventListener('click', (e) => { if (e.target === qExitModal) this.quantExitCancel(); });
+                const qExitCancel = document.getElementById('quantExitCancel');
+                if (qExitCancel) qExitCancel.addEventListener('click', () => this.quantExitCancel());
+                const qExitDiscard = document.getElementById('quantExitDiscard');
+                if (qExitDiscard) qExitDiscard.addEventListener('click', () => this.quantExitDiscard());
+                const qExitOverwrite = document.getElementById('quantExitOverwrite');
+                if (qExitOverwrite) qExitOverwrite.addEventListener('click', () => this.quantExitOverwrite());
+                const qExitSaveNew = document.getElementById('quantExitSaveNew');
+                if (qExitSaveNew) qExitSaveNew.addEventListener('click', () => this.quantExitShowNewName(true));
+                const qExitNewNameCancel = document.getElementById('quantExitNewNameCancel');
+                if (qExitNewNameCancel) qExitNewNameCancel.addEventListener('click', () => this.quantExitShowNewName(false));
+                const qExitNewNameConfirm = document.getElementById('quantExitNewNameConfirm');
+                if (qExitNewNameConfirm) qExitNewNameConfirm.addEventListener('click', () => this.quantExitSaveNew());
+            }
+            // 出具存档
+            const issueBtn = document.getElementById('evalIssueBtn');
+            if (issueBtn) issueBtn.addEventListener('click', () => this.issueReport());
+            const backBtn = document.getElementById('archiveBackBtn');
+            if (backBtn) backBtn.addEventListener('click', () => this.backFromArchive());
+            const reportCloseBtn = document.getElementById('reportCloseBtn');
+            if (reportCloseBtn) reportCloseBtn.addEventListener('click', () => this.closeReportSheet());
+            // 量化结构模板导出弹窗（静态）
+            const qExpModal = document.getElementById('quantTplExportModal');
+            if (qExpModal) {
+                qExpModal.addEventListener('click', (e) => { if (e.target === qExpModal) this.closeQuantExportModal(); });
+                const qExpCancel = document.getElementById('quantTplExportCancel');
+                if (qExpCancel) qExpCancel.addEventListener('click', () => this.closeQuantExportModal());
+                const qExpConfirm = document.getElementById('quantTplExportConfirm');
+                if (qExpConfirm) qExpConfirm.addEventListener('click', () => this.confirmQuantExport());
+                const qExpAll = document.getElementById('quantTplExportAll');
+                if (qExpAll) qExpAll.addEventListener('click', () => this.setQuantExportAll(true));
+                const qExpNone = document.getElementById('quantTplExportNone');
+                if (qExpNone) qExpNone.addEventListener('click', () => this.setQuantExportAll(false));
+            }
+            // 评估计划 ToDo
+            const planQuick = document.getElementById('planQuickAdd');
+            if (planQuick) planQuick.addEventListener('click', () => this.openPlanModal());
+            // 按学员：学员卡点击 → 评估记录弹窗（计划内任务 / 历史报告存档）
+            const stuRecModal = document.getElementById('stuRecordsModal');
+            if (stuRecModal) {
+                stuRecModal.addEventListener('click', (e) => { if (e.target === stuRecModal) this.closeStuRecords(); });
+                const stuRecClose = document.getElementById('stuRecordsClose');
+                if (stuRecClose) stuRecClose.addEventListener('click', () => this.closeStuRecords());
+                const stuRecList = document.getElementById('stuRecordsList');
+                if (stuRecList) stuRecList.addEventListener('click', (e) => {
+                    const openBtn = e.target.closest('[data-rec-open]');
+                    if (openBtn) { const pid = openBtn.dataset.pid; const sid = openBtn.dataset.sid; const mode = openBtn.dataset.mode; this.closeStuRecords(); this.openPlanStudent(pid, sid, mode); return; }
+                    const viewBtn = e.target.closest('[data-rec-view]');
+                    if (viewBtn) { const id = viewBtn.dataset.recView; this.closeStuRecords(); this.viewIssued(id); return; }
+                    const delBtn = e.target.closest('[data-rec-del]');
+                    if (delBtn) { this.deleteIssued(delBtn.dataset.recDel); this._renderStuRecords(); }
+                });
+            }
+            // 内容呈现方式：按计划 / 按学员
+            const planViewToggleEl = document.getElementById('planViewToggle');
+            if (planViewToggleEl) planViewToggleEl.addEventListener('click', (e) => {
+                const b = e.target.closest('.view-btn');
+                if (!b) return;
+                this.setPlanView(b.dataset.planview);
+            });
+            // 按学员：班级下拉快速定位
+            const planStuClassSel = document.getElementById('planStuClass');
+            if (planStuClassSel) planStuClassSel.addEventListener('change', () => {
+                this._planStuFilter = planStuClassSel.value;
+                this.renderPlanBoard();
+            });
+            const planModalEl = document.getElementById('planModal');
+            if (planModalEl) planModalEl.addEventListener('click', (e) => { if (e.target === planModalEl) this.closePlanModal(); });
+            const planCancel = document.getElementById('planCancel');
+            if (planCancel) planCancel.addEventListener('click', () => this.closePlanModal());
+            const planSave = document.getElementById('planSave');
+            if (planSave) planSave.addEventListener('click', () => this.savePlan());
+            const planTplSel = document.getElementById('planTpl');
+            if (planTplSel) planTplSel.addEventListener('change', () => this._updatePlanProjInfo());
+            const planTplPreview = document.getElementById('planTplPreview');
+            if (planTplPreview) planTplPreview.addEventListener('click', () => this.openTplPreview(planTplSel ? planTplSel.value : '__default__'));
+            const planClassListEl = document.getElementById('planClassList');
+            if (planClassListEl) planClassListEl.addEventListener('click', (e) => {
+                const el = e.target.closest('[data-cls]');
+                if (!el) return;
+                this._planClass = el.dataset.cls;
+                this._renderPlanClassList();
+                this._renderPlanStudentList();
+            });
+            const planStuListEl = document.getElementById('planStuList');
+            if (planStuListEl) planStuListEl.addEventListener('click', (e) => {
+                const el = e.target.closest('[data-sid]');
+                if (!el) return;
+                this._planAddStudent(el.dataset.sid);
+            });
+            const planSelListEl = document.getElementById('planSelList');
+            if (planSelListEl) planSelListEl.addEventListener('click', (e) => {
+                const el = e.target.closest('[data-sid]');
+                if (!el) return;
+                this._planRemoveStudent(el.dataset.sid);
+            });
+            const planSelClearEl = document.getElementById('planSelClear');
+            if (planSelClearEl) planSelClearEl.addEventListener('click', () => { this._planSel = []; this._renderPlanStudentList(); this._renderPlanSelectedList(); });
+            const planCardsEl = document.getElementById('planCards');
+            if (planCardsEl) {
+                planCardsEl.addEventListener('click', (e) => {
+                    // 按学员视图：学员信息卡整卡可点 → 评估记录弹窗
+                    const stuCard = e.target.closest('[data-rec-sid]');
+                    if (stuCard) { this.openStuRecords(stuCard.dataset.recSid); return; }
+                    // 进入填写 / 预览导出：功能按钮
+                    const openBtn = e.target.closest('button[data-open]');
+                    if (openBtn) { this.openPlanStudent(openBtn.dataset.pid, openBtn.dataset.sid, openBtn.dataset.mode); return; }
+                    // 计划主区：展开 / 收起学员
+                    const main = e.target.closest('.plan-card-main');
+                    if (main) { this.planAct(main.dataset.id, 'expand'); return; }
+                    const btn = e.target.closest('button[data-act]');
+                    if (btn) this.planAct(btn.dataset.id, btn.dataset.act);
+                });
+                planCardsEl.addEventListener('dragstart', (e) => {
+                    const sc = e.target.closest('.plan-stu-card');
+                    if (sc) {
+                        e.dataTransfer.setData('text/plain', sc.dataset.sid);
+                        this._dragStu = { pid: sc.dataset.pid, sid: sc.dataset.sid };
+                        sc.classList.add('dragging');
+                        return;
+                    }
+                    const pc = e.target.closest('.plan-card');
+                    if (!pc) return;
+                    e.dataTransfer.setData('text/plain', pc.dataset.id);
+                    this._dragPlanId = pc.dataset.id;
+                    pc.classList.add('dragging');
+                });
+                planCardsEl.addEventListener('dragend', (e) => {
+                    const t = e.target.closest('.plan-card, .plan-stu-card');
+                    if (t) t.classList.remove('dragging');
+                    planCardsEl.querySelectorAll('.drag-over').forEach((c) => c.classList.remove('drag-over'));
+                    this._dragPlanId = null;
+                    this._dragStu = null;
+                });
+                planCardsEl.addEventListener('dragover', (e) => {
+                    if (this._dragStu) {
+                        const sc = e.target.closest('.plan-stu-card');
+                        if (!sc || sc.dataset.pid !== this._dragStu.pid) return;
+                        e.preventDefault();
+                        sc.classList.add('drag-over');
+                        return;
+                    }
+                    const item = e.target.closest('.plan-item');
+                    if (!item || !this._dragPlanId) return;
+                    e.preventDefault();
+                    item.classList.add('drag-over');
+                });
+                planCardsEl.addEventListener('dragleave', (e) => {
+                    const t = e.target.closest('.plan-item, .plan-card, .plan-stu-card');
+                    if (t) t.classList.remove('drag-over');
+                });
+                planCardsEl.addEventListener('drop', (e) => {
+                    planCardsEl.querySelectorAll('.drag-over').forEach((c) => c.classList.remove('drag-over'));
+                    if (this._dragStu) {
+                        const sc = e.target.closest('.plan-stu-card');
+                        if (!sc || sc.dataset.pid !== this._dragStu.pid) return;
+                        e.preventDefault();
+                        const from = this._dragStu.sid;
+                        this.reorderPlanStudents(this._dragStu.pid, from, sc.dataset.sid);
+                        this._dragStu = null;
+                        return;
+                    }
+                    const item = e.target.closest('.plan-item');
+                    if (!item) return;
+                    e.preventDefault();
+                    const from = this._dragPlanId || e.dataTransfer.getData('text/plain');
+                    this.reorderPlan(from, item.dataset.id);
+                    this._dragPlanId = null;
+                });
+            }
+            // 任务点评：输入即自动保存 + 失焦再兜底（内容为动态渲染，用文档级委托）
+            const saveTaskCommentFrom = (e) => {
+                const ta = (e.target && e.target.closest) ? e.target.closest('textarea[data-task-comment]') : null;
+                if (ta) this.saveTaskComment(ta.dataset.taskComment, ta.value);
+            };
+            document.addEventListener('input', saveTaskCommentFrom);
+            document.addEventListener('focusout', saveTaskCommentFrom);
+            // 评估模板管理
+            const tplMgmtBtn = document.getElementById('evalTplMgmtBtn');
+            if (tplMgmtBtn) tplMgmtBtn.addEventListener('click', () => this.openTplMgmtModal());
+            const tplMgmtModalEl = document.getElementById('tplMgmtModal');
+            if (tplMgmtModalEl) {
+                tplMgmtModalEl.addEventListener('click', (e) => { if (e.target === tplMgmtModalEl) this.closeTplMgmtModal(); });
+                const tplMgmtClose = document.getElementById('tplMgmtClose');
+                if (tplMgmtClose) tplMgmtClose.addEventListener('click', () => this.closeTplMgmtModal());
+                // 模板管理：标签页切换（评估模板 / PDF 水印）
+                const tplMgmtTabs = document.getElementById('tplMgmtTabs');
+                if (tplMgmtTabs) tplMgmtTabs.addEventListener('click', (e) => {
+                    const tab = e.target.closest('.tpl-tab');
+                    if (!tab) return;
+                    const key = tab.dataset.tpltab;
+                    tplMgmtTabs.querySelectorAll('.tpl-tab').forEach((b) => b.classList.toggle('active', b === tab));
+                    const panes = { quant: 'tplPaneQuant', watermark: 'tplPaneWatermark' };
+                    Object.keys(panes).forEach((k) => {
+                        const pane = document.getElementById(panes[k]);
+                        if (pane) pane.classList.toggle('active', k === key);
+                    });
+                });
+                const tplMgmtExport = document.getElementById('tplMgmtExportBtn');
+                if (tplMgmtExport) tplMgmtExport.addEventListener('click', () => this.openQuantExportModal());
+                // 评估模板导入（JSON 文件）
+                const tplMgmtImport = document.getElementById('tplMgmtImportBtn');
+                if (tplMgmtImport) tplMgmtImport.addEventListener('click', () => this.openQuantImportPicker());
+                const tplMgmtImportFile = document.getElementById('tplMgmtImportFile');
+                if (tplMgmtImportFile) tplMgmtImportFile.addEventListener('change', (e) => {
+                    const f = e.target && e.target.files ? e.target.files[0] : null;
+                    this.importTemplateFile(f);
+                });
+                // 量化结构模板：预览弹窗（预览 / 编辑 双模式）
+                const tplPreviewModalEl = document.getElementById('tplPreviewModal');
+                if (tplPreviewModalEl) {
+                    tplPreviewModalEl.addEventListener('click', (e) => { if (e.target === tplPreviewModalEl) this.closeTplPreview(); });
+                    const tplPreviewClose = document.getElementById('tplPreviewClose');
+                    if (tplPreviewClose) tplPreviewClose.addEventListener('click', () => this.closeTplPreview());
+                    const tplPreviewToggle = document.getElementById('tplPreviewToggle');
+                    if (tplPreviewToggle) tplPreviewToggle.addEventListener('click', (e) => {
+                        const b = e.target.closest('.view-btn');
+                        if (!b || b.disabled) return;
+                        this.setTplPreviewMode(b.dataset.tplmode);
+                    });
+                }
+                const tplMgmtNewBtn = document.getElementById('tplMgmtNewBtn');
+                if (tplMgmtNewBtn) tplMgmtNewBtn.addEventListener('click', () => this.tplMgmtShowNew(true));
+                const tplMgmtNewCancel = document.getElementById('tplMgmtNewCancel');
+                if (tplMgmtNewCancel) tplMgmtNewCancel.addEventListener('click', () => this.tplMgmtShowNew(false));
+                const tplMgmtNewConfirm = document.getElementById('tplMgmtNewConfirm');
+                if (tplMgmtNewConfirm) tplMgmtNewConfirm.addEventListener('click', () => this.tplMgmtSaveNew());
+                const tplMgmtListEl = document.getElementById('tplMgmtList');
+                if (tplMgmtListEl) tplMgmtListEl.addEventListener('click', (e) => {
+                    const btn = e.target.closest('button[data-act]');
+                    if (!btn) return;
+                    this.tplMgmtAct(btn.dataset.id, btn.dataset.act);
+                });
+                const tplProjSave = document.getElementById('tplProjSave');
+                if (tplProjSave) tplProjSave.addEventListener('click', () => this.tplProjSave());
+                const tplProjClear = document.getElementById('tplProjClear');
+                if (tplProjClear) tplProjClear.addEventListener('click', () => this.tplProjClear());
+                const tplProjCancel = document.getElementById('tplProjCancel');
+                if (tplProjCancel) tplProjCancel.addEventListener('click', () => this.tplProjCancel());
+                // 模板编辑模式底部控制（位于模板预览窗内）
+                const tplEditCancel = document.getElementById('tplEditCancel');
+                if (tplEditCancel) tplEditCancel.addEventListener('click', () => this.closeTplEditModal());
+                const tplEditSave = document.getElementById('tplEditSave');
+                if (tplEditSave) tplEditSave.addEventListener('click', () => this.tplEditSaveOriginal());
+                const tplEditNewConfirm = document.getElementById('tplEditNewConfirm');
+                if (tplEditNewConfirm) tplEditNewConfirm.addEventListener('click', () => this.tplEditSaveNew());
+                // 模板编辑：赛事规划行（增行；删行在渲染时逐个绑定）
+                const tplCompAdd = document.getElementById('tplEditCompPlanAdd');
+                if (tplCompAdd) tplCompAdd.addEventListener('click', () => {
+                    const cur = this.collectEditCompPlan();
+                    cur.push({ competition: '', date: '' });
+                    this.renderTplEditCompPlan(cur);
+                });
+            }
 
             // ===== 评估范围弹窗 =====
             const scopeBtn = document.getElementById('scopeTrigger');
@@ -460,6 +2086,70 @@
         showEmpty(msg) {
             const content = document.getElementById('evalContent');
             if (content) content.innerHTML = `<div class="empty-state"><div class="icon">👆</div><p>${Shared.escapeHtml(msg)}</p></div>`;
+        },
+        // ============ 报告填写弹窗（全屏 sheet，可上下滚动） ============
+        openReportSheet(subtitle) {
+            const sheet = document.getElementById('reportSheet');
+            if (!sheet) return;
+            const sub = document.getElementById('reportSheetSub');
+            if (sub) sub.textContent = subtitle || '';
+            sheet.classList.add('open');
+            document.body.classList.add('report-sheet-lock');
+            const bodyEl = sheet.querySelector('.report-sheet-body');
+            if (bodyEl) bodyEl.scrollTop = 0;
+        },
+        closeReportSheet() {
+            const sheet = document.getElementById('reportSheet');
+            if (sheet) sheet.classList.remove('open');
+            document.body.classList.remove('report-sheet-lock');
+            // 若正在查看历史报告，一并退出查看态
+            if (this.viewingArchiveId) {
+                this.viewingArchiveId = null;
+                const notice = document.getElementById('archiveViewNotice');
+                if (notice) notice.style.display = 'none';
+                const ib = document.getElementById('evalIssueBtn');
+                if (ib && this.viewMode === 'preview') ib.style.display = '';
+            }
+            // 回到页面视图（避免停留在「导出预览」导致计划看板隐藏）
+            if (this.viewMode !== 'edit') this._applyViewMode('edit');
+            this._autoMarkFillOnExit();
+            // 退出报告：清掉计划级的元素/水印覆盖，水印层恢复为全局设置
+            if (this._elemOverride || this._wmOverride) {
+                this._elemOverride = null;
+                this._wmOverride = null;
+                this.renderWatermark();
+            }
+            this._curPlanId = null;
+            this._curSid = null;
+            this.renderPlanBoard();
+        },
+        // ============ 填写会话：快照 + 退出时自动记进度 ============
+        // 学员填写相关数据快照（分数 / 结构 / 评语），用于判断本次进入是否有改动
+        // 注：报告元素（evalReportElements）与水印（evalWatermark）为全局设置，不计入单学员改动
+        _fillSnapshot(sid) {
+            const pick = (key) => {
+                try { return JSON.parse(localStorage.getItem(key) || '{}')[sid] || null; } catch (e) { return null; }
+            };
+            return JSON.stringify([
+                pick('evalQuantScores'),
+                pick('evalQuantTemplate'),
+                pick('evalCoachComments'),
+                pick('evalFinalComments'),
+            ]);
+        },
+        // 退出填写弹窗：对比快照，有改动且尚未标记时自动把「填写」标记为完成
+        _autoMarkFillOnExit() {
+            const pid = this._fillPlanId;
+            const sid = this._fillSid;
+            const base = this._fillBase;
+            this._fillPlanId = null;
+            this._fillSid = null;
+            this._fillBase = null;
+            if (!pid || !sid || base == null) return;
+            if (this._fillSnapshot(sid) === base) return; // 没改动，不动进度
+            if (!this._markPlanTask(pid, sid, 'fill')) return;
+            const st = (Shared.data.students || []).find((s) => s.id === sid);
+            this.toast(`已记录 ${st ? st.name : '该学员'} 的填写进度`);
         },
 
         // ============ 数据收集（单个学员） ============
@@ -508,6 +2198,8 @@
                         const task = taskMap[r.taskId];
                         addEntry(r.taskId, r.score, r.time, {
                             taskId: r.taskId,
+                            trainingId: training.id,
+                            trainingName: training.name || '',
                             date: r.date || (r.submittedAt || '').slice(0, 10) || '-',
                             sourceLabel: `🎯 自主训练${trSuffix}`,
                             competitionType: 'practice',
@@ -534,6 +2226,8 @@
                             if (score === null && time === null) return;
                             addEntry(tid, score, time, {
                                 taskId: tid,
+                                trainingId: training.id,
+                                trainingName: training.name || '',
                                 date: m.date || '-',
                                 sourceLabel: `${Shared.getMockTypeLabel(m)} · ${m.name || Shared.getMockTypeText(m)}${trSuffix}`,
                                 competitionType: m.competitionType || 'mock',
@@ -667,19 +2361,29 @@
             const content = document.getElementById('evalContent');
             if (!content) return;
             const student = (Shared.data.students || []).find((s) => s.id === this.selectedStudentId);
-            if (!student) { this.showEmpty('请选择学员，生成评估报告'); return; }
+            if (!student) { this.showEmpty('请先从上方「📋 评估计划」点学员卡的「✍️ 进入填写」'); return; }
             const trainings = this.getSelectedTrainings();
-            if (trainings.length === 0) { this.showEmpty('请选择集训，生成评估报告'); return; }
+            if (trainings.length === 0) { this.showEmpty('暂无可用评估数据（未找到任何集训 / 赛事数据）'); return; }
             const r = this.collectStudentAssessment(student.id, trainings, this.selectedMockIds);
             if (!r) {
                 content.innerHTML = `<div class="empty-state"><div class="icon">📭</div><p>${Shared.escapeHtml(student.name)} 在选定范围内暂无成绩数据</p></div>`;
                 return;
             }
+            // 每次生成报告：重置量化细则为「填写」模式并清理编辑会话，避免串到其它学员/下一次生成
+            this.quantSubMode = 'fill';
+            this._quantEditBaseline = null;
+            this._quantExitPrompting = false;
+            this._quantExitCb = null;
+            this._quantExitCancelCb = null;
+            // 离开“已出具报告”查看态（重新生成为当前报告）
+            if (this.viewingArchiveId) this.viewingArchiveId = null;
+            const _arcNotice = document.getElementById('archiveViewNotice');
+            if (_arcNotice) _arcNotice.style.display = 'none';
+            this._hideIssueBtnForArchive(false);
             content.innerHTML = this.renderReport(student, trainings, r);
-            this.drawTaskChart(r.records, r.taskMap);
+            this.drawTaskChart(this._chartModel(student.id), r.taskMap);
             this.drawRadarCharts();
             this.initQuantTable();
-            this.initCompPlanTable();
             const resetBtn = document.getElementById('quantResetBtn');
             if (resetBtn) resetBtn.addEventListener('click', () => this.resetQuant());
             const qAddDim = document.getElementById('quantAddDimBtn');
@@ -730,7 +2434,9 @@
                     if (inp) { inp.value = ''; inp.focus(); }
                     return;
                 }
-                this.saveStructureTemplate(name, this.getQuantTemplate());
+                // 已被已出具报告引用的模板只读：不可同名覆盖（如需新版请另存为新模板）
+                if (!this.assertTemplateWritable(name)) return;
+                this.saveStructureTemplate(name, this.currentQuantTemplate());
                 if (inp) inp.value = '';
                 const row = document.getElementById('quantTplSaveRow');
                 if (row) row.style.display = 'none';
@@ -746,8 +2452,19 @@
                 this.refreshQuantStructSelect('');
                 this.toast('已删除用户模板');
             });
+            // 导出量化结构模板（可多选）
+            const qTplExport = document.getElementById('quantTplExport');
+            if (qTplExport) qTplExport.addEventListener('click', () => this.openQuantExportModal());
             // 恢复默认 = 把当前学员结构设回「内置默认」；默认模板由「设为默认」按钮控制
             this.updateQuantTplControls();
+            // 量化评估细则：填写 / 编辑 模式切换（仅报告填写视图内出现）
+            const qModeToggle = document.getElementById('quantModeToggle');
+            if (qModeToggle) {
+                qModeToggle.querySelectorAll('.view-btn').forEach((b) => {
+                    b.addEventListener('click', () => this.setQuantSubMode(b.dataset.quantmode));
+                });
+            }
+            this.updateQuantModeUI();
             this.startEditCoachComment(); // 教练评语默认开启编辑
             // 左栏：点击框内直接进入编辑
             const origBox = document.getElementById('coachOrigBox');
@@ -799,34 +2516,57 @@
             return labels.length ? labels.join(' + ') : '—';
         },
 
-        // ============ 参赛记录表（报告顶部，扁平表格：赛事 | 基础任务得分 | 成绩） ============
+        // ============ 赛事经历表（报告顶部，扁平表格：赛事 | 基础任务得分 | 成绩） ============
+        // 数据来源＝系统里记录的赛事：集训的「赛事名称 / 赛事日期」（与「赛事规划」默认行同一来源），
+        // 每个集训（=一场赛事）一行；成绩取该集训官方赛事中该学员的最好成绩
+        // 注：内部模拟赛窗口不计入「经历」
         renderCompetitions(student, trainings) {
             const sid = student.id;
-            const ids = this.selectedMockIds || [];
             const D = Shared.data;
             const basicTask = (D.tasks || []).find((t) => t.type === 'basic');
             const rows = [];
 
             trainings.forEach((training) => {
-                // 仅展示正赛（官方赛事），不含集训内部的模拟赛记录
-                const comps = (training.mockCompetitions || []).filter((m) => ids.includes(m.id) && Shared.getMockType(m) === 'official');
+                const compName = (training.competitionName || '').trim() || (training.name || '').trim();
+                const comps = (training.mockCompetitions || []).filter((m) => Shared.getMockType(m) === 'official');
+                if (!compName && !comps.length) return;
+                let withdrawn = false;
+                let best = null;
+                let bestTime = null;
+                let rank = null;
+                let prize = '';
                 comps.forEach((m) => {
-                    // 赛事名称：填写孩子参加的集训的赛事名称，为空则回退集训名称，再回退类型文本
-                    const compName = (training.competitionName || '').trim() || (training.name || '').trim() || Shared.getMockTypeText(m);
-                    const withdrawn = !!(m.withdrawn && m.withdrawn[sid]);
-                    const ss = !withdrawn ? (m.scores && m.scores[sid]) : null;
+                    if (m.withdrawn && m.withdrawn[sid]) withdrawn = true;
+                    const ss = m.scores && m.scores[sid];
+                    if (!ss) return;
                     // 基础任务列：优先基础任务，缺失时回退到该学员首个有成绩的任务
                     let taskId = basicTask ? basicTask.id : null;
-                    if ((!taskId || !(ss && ss[taskId])) && ss) {
+                    if ((!taskId || !ss[taskId])) {
                         const keys = Object.keys(ss);
                         if (keys.length) taskId = keys[0];
                     }
-                    const entry = taskId && ss ? ss[taskId] : null;
-                    const best = entry ? Shared.getBestScore(entry) : null;
-                    const bestTime = entry ? Shared.getBestScoreTime(entry) : null;
-                    const prize = (m.prizes && m.prizes[sid]) || '';
-                    const rank = (m.officialRankings && m.officialRankings[sid]) || (m.rankings && m.rankings[sid]) || null;
-                    rows.push({ date: m.date || '-', name: compName, withdrawn, participated: best !== null, best, bestTime, rank, prize });
+                    const entry = taskId ? ss[taskId] : null;
+                    if (!entry) return;
+                    const b = Shared.getBestScore(entry);
+                    const bt = Shared.getBestScoreTime(entry);
+                    if (b != null && (best == null || b > best)) {
+                        best = b;
+                        bestTime = bt;
+                    }
+                    const p = (m.prizes && m.prizes[sid]) || '';
+                    if (p) prize = p;
+                    const rk = (m.officialRankings && m.officialRankings[sid]) || (m.rankings && m.rankings[sid]) || null;
+                    if (rk && (rank == null || Number(rk) < Number(rank))) rank = rk;
+                });
+                rows.push({
+                    date: (training.date || '').trim() || '-',
+                    name: compName || Shared.getMockTypeText(comps[0] || {}),
+                    withdrawn,
+                    participated: best !== null,
+                    best,
+                    bestTime,
+                    rank,
+                    prize,
                 });
             });
 
@@ -884,8 +2624,8 @@
                 </div>`;
         },
 
-        // ============ 赛事规划表（赛事 + 预计时间，填写模式下可编辑） ============
-        // 未保存过时按选定集训生成默认行（赛事名=集训 competitionName，未填回退集训名；预计时间=集训日期）
+        // ============ 赛事规划表（赛事 + 预计时间；内容随「评估模板」保存，报告内只读展示） ============
+        // 数据来源优先级：评估模板的赛事规划 → 旧数据（曾按学员保存）→ 按选定集训生成默认行
         renderCompetitionPlan(trainings) {
             return this.compPlanHtml();
         },
@@ -894,44 +2634,34 @@
             if (!sid) return null;
             try { return JSON.parse(localStorage.getItem('evalCompPlans') || '{}')[sid] || null; } catch (e) { return null; }
         },
-        saveCompPlans(rows) {
-            const sid = this.selectedStudentId;
-            if (!sid) return;
-            let all = {};
-            try { all = JSON.parse(localStorage.getItem('evalCompPlans') || '{}'); } catch (e) { all = {}; }
-            all[sid] = rows;
-            localStorage.setItem('evalCompPlans', JSON.stringify(all));
-        },
         defaultCompPlans(trainings) {
             return (trainings || []).map((t) => ({
                 competition: (t.competitionName || '').trim() || (t.name || '').trim() || '',
                 date: (t.date || '').trim() || '',
             }));
         },
+        // 规整赛事规划行（去空格、丢弃空行）
+        normalizeCompPlan(rows) {
+            if (!Array.isArray(rows)) return [];
+            return rows
+                .map((r) => ({ competition: String((r && r.competition) || '').trim(), date: String((r && r.date) || '').trim() }))
+                .filter((r) => r.competition || r.date);
+        },
         compPlanRows() {
+            const tplRows = this.normalizeCompPlan(this.activeReportElements().compPlan);
+            if (tplRows.length) return tplRows;
             const saved = this.getCompPlans();
-            return (saved && saved.length) ? saved : this.defaultCompPlans(this.getSelectedTrainings());
+            if (saved && saved.length) return this.normalizeCompPlan(saved);
+            return this.defaultCompPlans(this.getSelectedTrainings());
         },
         compPlanHtml() {
             const plans = this.compPlanRows();
             if (plans.length === 0) return '';
-            const editable = this.viewMode !== 'preview';
-            const inputStyle = 'width:100%;min-width:120px;padding:0.25rem 0.4rem;border:1px solid var(--gray-300);border-radius:4px;font-size:0.85rem;';
-            const rowHtml = plans.map((p, i) => {
-                if (editable) {
-                    return `
-                        <tr>
-                            <td style="min-width:150px;"><input type="text" class="comp-plan-input" data-field="competition" data-idx="${i}" value="${Shared.escapeHtml(p.competition || '')}" placeholder="赛事名称" style="${inputStyle}"></td>
-                            <td style="min-width:120px;"><input type="text" class="comp-plan-input" data-field="date" data-idx="${i}" value="${Shared.escapeHtml(p.date || '')}" placeholder="预计时间" style="${inputStyle}"></td>
-                            <td style="text-align:center;width:44px;"><button type="button" class="btn btn-sm btn-outline comp-plan-del" data-idx="${i}" title="删除此行">🗑</button></td>
-                        </tr>`;
-                }
-                return `
+            const rowHtml = plans.map((p) => `
                     <tr>
                         <td style="color:var(--gray-700);">${Shared.escapeHtml(p.competition || '—')}</td>
                         <td style="text-align:center;color:var(--gray-600);">${Shared.escapeHtml(p.date || '—')}</td>
-                    </tr>`;
-            }).join('');
+                    </tr>`).join('');
             return `
                 <div id="compPlanContainer">
                     <div style="overflow-x:auto;">
@@ -940,60 +2670,12 @@
                                 <tr>
                                     <th>赛事</th>
                                     <th style="text-align:center;">预计时间</th>
-                                    ${editable ? '<th style="width:44px;"></th>' : ''}
                                 </tr>
                             </thead>
                             <tbody id="compPlanBody">${rowHtml}</tbody>
                         </table>
                     </div>
-                    ${editable ? '<div style="margin-top:0.35rem;"><button type="button" class="btn btn-sm btn-outline" id="compPlanAddBtn">＋ 添加一行</button></div>' : ''}
                 </div>`;
-        },
-        // 读取赛事规划表格当前行
-        readCompPlanRows() {
-            const body = document.getElementById('compPlanBody');
-            if (!body) return [];
-            return [...body.querySelectorAll('tr')].map((tr) => {
-                const comp = tr.querySelector('input[data-field="competition"]');
-                const date = tr.querySelector('input[data-field="date"]');
-                return { competition: comp ? comp.value.trim() : '', date: date ? date.value.trim() : '' };
-            });
-        },
-        initCompPlanTable() {
-            const body = document.getElementById('compPlanBody');
-            if (!body) return;
-            const rerender = () => {
-                const container = document.getElementById('compPlanContainer');
-                if (!container) return;
-                container.innerHTML = this.compPlanHtml();
-                this.initCompPlanTable();
-            };
-            body.querySelectorAll('input.comp-plan-input').forEach((inp) => {
-                inp.addEventListener('input', () => this.saveCompPlans(this.readCompPlanRows()));
-            });
-            body.querySelectorAll('button.comp-plan-del').forEach((btn) => {
-                btn.addEventListener('click', () => {
-                    const idx = Number(btn.dataset.idx);
-                    const list = this.readCompPlanRows();
-                    list.splice(idx, 1);
-                    this.saveCompPlans(list);
-                    rerender();
-                });
-            });
-            const addBtn = document.getElementById('compPlanAddBtn');
-            if (addBtn) addBtn.addEventListener('click', () => {
-                const list = this.readCompPlanRows();
-                list.push({ competition: '', date: '' });
-                this.saveCompPlans(list);
-                rerender();
-            });
-        },
-        // 按视图模式重渲染赛事规划（填写=可编辑，预览=纯文本）
-        refreshCompPlanMode() {
-            const container = document.getElementById('compPlanContainer');
-            if (!container) return;
-            container.innerHTML = this.compPlanHtml();
-            this.initCompPlanTable();
         },
         // 按视图模式重渲染量化评估表（填写=可编辑，预览=只读/纯文本）
         refreshQuantTableMode() {
@@ -1006,7 +2688,10 @@
         // 依据量化评估表已打分数据，汇总 维度/子维度 评分，与参考值对比计算同龄指数
         computeQuantSummary() {
             const saved = this.getQuantScores();
-            const template = this.getQuantTemplate();
+            // 编辑模式：用未提交的草稿结构（_quantTemplate），否则用已保存结构
+            const template = (this.quantSubMode === 'edit' && this._quantTemplate && this._quantTemplate.length)
+                ? this._quantTemplate
+                : this.getQuantTemplate();
             const avg = (arr) => (arr && arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null);
             const dims = template.map((dim, di) => {
                 let ci = 0;
@@ -1069,8 +2754,9 @@
                 </div>`;
             const idx = (score, ref) => (ref > 0 ? score / ref : 0);
             const MS = 1.5;
-            // 每个维度一张雷达（按实际维度名/数量动态生成）
-            const perRadar = sum.dims.map((d, di) =>
+            // 每个维度一张雷达（按实际维度名/数量动态生成；雷达区严格 2×2 = 前 3 个维度 + 综合评分，超出 3 个维度的雷达不再追加，避免“综合评分”掉到第 3 行）
+            const radarDims = sum.dims.slice(0, 3);
+            const perRadar = radarDims.map((d, di) =>
                 radarCard('radarDim' + di, d.name || ('维度' + (di + 1)), d.subs.map((s) => s.name), d.subs.map((s) => idx(s.score, s.ref)), MS)
             ).join('');
             const radars = `
@@ -1267,7 +2953,9 @@
                 const cell = (grid.clientWidth - gap) / 2;
                 if (cell > 0) size = Math.max(150, Math.min(180, Math.floor(cell) - 2));
             }
-            sum.dims.forEach((d, di) => {
+            // 与 buildQuantSummaryHtml 保持一致：仅前 3 个维度雷达 + 综合评分（严格 2×2）
+            const radarDims = sum.dims.slice(0, 3);
+            radarDims.forEach((d, di) => {
                 this.drawRadar('radarDim' + di, d.subs.map((s) => s.name), d.subs.map((s) => idx(s.score, s.ref)), MS, size);
             });
             this.drawRadar('radarOverall', sum.dims.map((d) => d.name), sum.dims.map((d) => idx(d.score, d.ref)), MS, size);
@@ -1320,7 +3008,7 @@
             const del = document.getElementById('wmTemplateDel');
             if (del) del.style.display = sel && sel.value ? '' : 'none';
         },
-        // 把整套水印设置填入弹窗字段
+        // 把整套水印设置填入「🖨 PDF 水印」标签页字段
         applyWatermarkSettingsToModal(s) {
             if (!s) return;
             const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
@@ -1345,7 +3033,7 @@
             const box = document.getElementById('reportWatermark');
             if (!box) return;
             box.innerHTML = '';
-            const wm = this.getWatermark();
+            const wm = this.activeWatermark(); // 计划若指定水印模板则优先
             const lines = String(wm.text || '').split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
             if (!wm.enabled || !lines.length) return;
             const fontSize = Math.max(10, Math.min(200, parseInt(wm.fontSize, 10) || 28));
@@ -1378,7 +3066,13 @@
             box.innerHTML = html;
             box.style.opacity = (Math.max(0, Math.min(100, parseFloat(wm.opacity) || 10)) / 100).toString();
         },
-        // 编辑元素弹窗：装载当前水印设置
+        // 「🖨 PDF 水印」标签页：保存当前水印设置（全局设置，不依赖学员）
+        saveWatermarkFromTab() {
+            this.saveWatermark(this.collectWatermarkFromModal());
+            this.renderWatermark();
+            this.toast('水印设置已保存');
+        },
+        // 模板管理「🖨 PDF 水印」标签页：装载当前水印设置
         loadWatermarkModal() {
             const wm = this.getWatermark();
             const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
@@ -1392,7 +3086,7 @@
             if (en) en.checked = !!wm.enabled;
             this.refreshWatermarkTemplateSelect('');
         },
-        // 收集编辑元素弹窗中的水印设置
+        // 收集「🖨 PDF 水印」标签页中的水印设置
         collectWatermarkFromModal() {
             const get = (id) => { const el = document.getElementById(id); return el ? el.value : ''; };
             const en = document.getElementById('wmEnabled');
@@ -1407,64 +3101,196 @@
             };
         },
 
-        // ============ 报告页面元素（标题 + 学员信息行） ============
-        getReportHeader(student) {
-            const sid = student.id;
-            let stored = {};
-            try { stored = JSON.parse(localStorage.getItem('evalReportHeader') || '{}')[sid] || {}; } catch (e) { stored = {}; }
-            const now = new Date();
-            const today = now.getFullYear() + '/' + (now.getMonth() + 1) + '/' + now.getDate();
-            // 学员 / 班级：始终自动带出真实数据（不允许在编辑元素中修改）；上课时间不再提供
+        // ============ 报告页面元素（属于「评估模板」：结构 + 元素一起保存） ============
+        // 元素字段：{ title, coach, date, aiPrompt, aiDataNote }
+        // 存放位置：evalQuantTemplateMeta[模板名].el（'__default__' = 内置默认模板的默认元素）
+        // 兼容旧数据：早期把报告元素存在全局键 evalReportElements / evalAIPrompt / evalAIDataNote、
+        // 元素模板存在 evalReportElementTemplates（仅迁移时读取，不再写入）
+        _mergeElem(base, add) {
+            const o = { ...(base || {}) };
+            if (!add) return o;
+            ['title', 'coach', 'date', 'aiPrompt', 'aiDataNote'].forEach((k) => {
+                const v = add[k];
+                if (v != null && String(v).trim() !== '') o[k] = v;
+            });
+            // 赛事规划：模板设置的行列表（未设置/空则沿用下层）
+            if (Array.isArray(add.compPlan) && add.compPlan.length) {
+                o.compPlan = add.compPlan.map((r) => ({ competition: (r && r.competition) || '', date: (r && r.date) || '' }));
+            }
+            return o;
+        },
+        // 某评估模板自带（未合并默认值）的元素字段
+        getTemplateElementsRaw(name) {
+            const key = name || '__default__';
+            const meta = this.getTemplateMeta();
+            return (meta[key] && meta[key].el && typeof meta[key].el === 'object') ? { ...meta[key].el } : {};
+        },
+        // 读取某评估模板生效的元素字段（模板未设的字段回退到默认元素设置）
+        // 内置默认（'__default__'）为系统模板：只读，永不写入
+        getTemplateElements(name) {
+            return this._mergeElem(this.getReportElements(), this.getTemplateElementsRaw(name));
+        },
+        // 保存某评估模板的元素字段（仅限用户模板；内置默认不可写）
+        saveTemplateElements(name, el) {
+            const key = name || '';
+            if (!key || this.isReservedStructName(key)) return;
+            const meta = this.getTemplateMeta();
+            const cur = meta[key] || {};
+            meta[key] = { ...cur, el: {
+                title: (el && el.title) || '',
+                coach: (el && el.coach) || '',
+                date: (el && el.date) || '',
+                aiPrompt: (el && el.aiPrompt) || '',
+                aiDataNote: (el && el.aiDataNote) || '',
+                compPlan: this.normalizeCompPlan(el && el.compPlan),
+            } };
+            this.saveTemplateMeta(meta);
+        },
+        // 默认元素设置（= 内置默认模板的元素；旧全局键作为回退）
+        getReportElements() {
+            let legacy = {};
+            try { legacy = JSON.parse(localStorage.getItem('evalReportElements') || '{}'); } catch (e) { legacy = {}; }
+            if (!legacy || typeof legacy !== 'object') legacy = {};
+            let legacyPrompt = '';
+            let legacyNote = '';
+            try {
+                legacyPrompt = localStorage.getItem('evalAIPrompt') || '';
+                legacyNote = localStorage.getItem('evalAIDataNote') || '';
+            } catch (e) { /* ignore */ }
+            const el = this.getTemplateElementsRaw('__default__');
             return {
-                title: stored.title || '训练评估报告',
-                studentName: student.name,
-                className: Shared.getCurrentClassName(sid),
-                coach: stored.coach || '',
-                date: stored.date || today,
+                title: '', coach: '', date: '', compPlan: [],
+                aiPrompt: legacyPrompt, aiDataNote: legacyNote,
+                ...legacy, ...el,
             };
         },
-
-        saveReportHeader(fields) {
-            const sid = this.selectedStudentId;
-            if (!sid) return;
-            let all = {};
-            try { all = JSON.parse(localStorage.getItem('evalReportHeader') || '{}'); } catch (e) { all = {}; }
-            all[sid] = { ...(all[sid] || {}), ...fields };
-            localStorage.setItem('evalReportHeader', JSON.stringify(all));
+        // 旧「报告元素模板」（仅用于迁移与旧计划回退）
+        getReportElementTemplates() {
+            try { return JSON.parse(localStorage.getItem('evalReportElementTemplates') || '{}'); } catch (e) { return {}; }
         },
-
-        openReportHeaderModal() {
-            const student = (Shared.data.students || []).find((s) => s.id === this.selectedStudentId);
-            if (!student) { this.toast('请先选择学员', 'warning'); return; }
-            const h = this.getReportHeader(student);
-            const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
-            set('reportHeaderTitle', h.title);
-            set('reportHeaderCoach', h.coach);
-            set('reportHeaderDate', h.date);
-            set('reportHeaderAIPrompt', this.getAIPrompt());
-            set('reportHeaderAIDataNote', this.getAIDataNote());
-            this.loadWatermarkModal();
-            const modal = document.getElementById('reportHeaderModal');
-            if (modal) modal.classList.add('open');
+        // 一次性迁移：把旧「元素模板 / 全局元素设置」并入「评估模板」
+        migrateTemplateElements() {
+            const FLAG = 'evalTplElemMerged';
+            try { if (localStorage.getItem(FLAG)) return; } catch (e) { return; }
+            const structs = this.getQuantStructTemplates() || {};
+            const legacy = this.getReportElementTemplates() || {};
+            const baseEl = {
+                title: this.getReportElements().title || '',
+                coach: this.getReportElements().coach || '',
+                date: this.getReportElements().date || '',
+                aiPrompt: this.getReportElements().aiPrompt || '',
+                aiDataNote: this.getReportElements().aiDataNote || '',
+            };
+            // 内置默认＝系统模板：不写入（默认元素由 getReportElements() 的旧全局键回退，保持默认模板原样）
+            // 已有结构模板：优先同名旧元素模板，否则沿用当前元素设置
+            Object.keys(structs).forEach((n) => {
+                if (this.isReservedStructName(n)) return;
+                if (Object.keys(this.getTemplateElementsRaw(n)).length) return;
+                this.saveTemplateElements(n, legacy[n] || baseEl);
+            });
+            // 旧元素模板若没有同名结构模板：按内置默认结构补一个评估模板，避免内容丢失
+            Object.keys(legacy).forEach((n) => {
+                if (!n || structs[n] || this.isReservedStructName(n)) return;
+                this.saveStructureTemplate(n, this.defaultQuantTemplate());
+                this.saveTemplateElements(n, legacy[n]);
+            });
+            try { localStorage.setItem(FLAG, '1'); } catch (e) { /* ignore */ }
         },
-
-        saveReportHeaderModal() {
-            const sid = this.selectedStudentId;
-            if (!sid) return;
-            const get = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
-            this.saveReportHeader({
+        // 模板编辑弹窗内的元素字段：装载 / 收集
+        _fillEditElemFields(name) {
+            const el = this.getTemplateElements(name);
+            const set = (id, v) => { const n = document.getElementById(id); if (n) n.value = v == null ? '' : v; };
+            set('reportHeaderTitle', el.title);
+            set('reportHeaderCoach', el.coach);
+            set('reportHeaderDate', el.date);
+            set('reportHeaderAIPrompt', el.aiPrompt);
+            set('reportHeaderAIDataNote', el.aiDataNote);
+            this.renderTplEditCompPlan(el.compPlan);
+        },
+        // 模板编辑弹窗内的赛事规划行（可增删改；填写报告时不再逐份填写）
+        renderTplEditCompPlan(rows) {
+            const body = document.getElementById('tplEditCompPlanBody');
+            if (!body) return;
+            const inputStyle = 'width:100%;padding:0.25rem 0.4rem;border:1px solid var(--gray-300);border-radius:4px;font-size:0.82rem;box-sizing:border-box;';
+            const list = Array.isArray(rows) ? rows : [];
+            body.innerHTML = list.length
+                ? list.map((r, i) => `
+                        <tr>
+                            <td><input type="text" class="tpl-comp-plan-input" data-field="competition" data-idx="${i}" value="${Shared.escapeHtml((r && r.competition) || '')}" placeholder="赛事名称" style="${inputStyle}"></td>
+                            <td><input type="text" class="tpl-comp-plan-input" data-field="date" data-idx="${i}" value="${Shared.escapeHtml((r && r.date) || '')}" placeholder="预计时间" style="${inputStyle}"></td>
+                            <td style="text-align:center;width:44px;"><button type="button" class="btn btn-sm btn-outline tpl-comp-plan-del" data-idx="${i}" title="删除此行">🗑</button></td>
+                        </tr>`).join('')
+                : '<tr><td colspan="3" style="text-align:center;color:var(--gray-400);font-size:0.8rem;">（暂无规划，点「＋ 添加一行」）</td></tr>';
+            body.querySelectorAll('button.tpl-comp-plan-del').forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    const cur = this.collectEditCompPlan();
+                    cur.splice(Number(btn.dataset.idx), 1);
+                    this.renderTplEditCompPlan(cur);
+                });
+            });
+        },
+        // 读取模板弹窗内的赛事规划行（含未填写的空行，保存时再统一过滤）
+        collectEditCompPlan() {
+            const body = document.getElementById('tplEditCompPlanBody');
+            if (!body) return [];
+            return [...body.querySelectorAll('input.tpl-comp-plan-input[data-field="competition"]')].map((inp) => {
+                const d = body.querySelector(`input.tpl-comp-plan-input[data-field="date"][data-idx="${inp.dataset.idx}"]`);
+                return { competition: inp.value.trim(), date: d ? d.value.trim() : '' };
+            });
+        },
+        collectEditElements() {
+            const get = (id) => { const n = document.getElementById(id); return n ? String(n.value).trim() : ''; };
+            return {
                 title: get('reportHeaderTitle'),
                 coach: get('reportHeaderCoach'),
                 date: get('reportHeaderDate'),
-            });
-            this.saveAIPrompt(get('reportHeaderAIPrompt'));
-            this.saveAIDataNote(get('reportHeaderAIDataNote'));
-            this.saveWatermark(this.collectWatermarkFromModal());
-            const modal = document.getElementById('reportHeaderModal');
-            if (modal) modal.classList.remove('open');
-            this.renderWatermark();
-            this.toast('已保存，报告头部已刷新');
-            this.generate();
+                aiPrompt: get('reportHeaderAIPrompt'),
+                aiDataNote: get('reportHeaderAIDataNote'),
+                compPlan: this.normalizeCompPlan(this.collectEditCompPlan()),
+            };
+        },
+
+        // 打开计划学员报告前：把该计划选定模板的元素 / PDF 水印模板作为「本次报告」的覆盖值
+        // 注意：不写入全局设置（evalReportElements / evalWatermark / evalAIPrompt），
+        // 否则用户对模板元素的手动修改会被反复冲掉
+        _applyPlanReportTemplates(plan) {
+            this._elemOverride = null;
+            this._wmOverride = null;
+            if (!plan) return;
+            // 评估模板自带元素；旧计划（带 elemTemplateKey）仍按旧「元素模板」回退
+            const key = plan.templateKey || '__default__';
+            const legacy = plan.elemTemplateKey ? (this.getReportElementTemplates()[plan.elemTemplateKey] || null) : null;
+            const merged = this._mergeElem(this._mergeElem({}, legacy), this.getTemplateElementsRaw(key));
+            if (Object.keys(merged).length) this._elemOverride = merged;
+            if (plan.wmTemplateKey) {
+                const w = this.getWatermarkTemplates()[plan.wmTemplateKey];
+                if (w) this._wmOverride = { ...w };
+            }
+        },
+        // 当前报告生效的报告元素（计划模板覆盖优先，否则默认元素设置）
+        activeReportElements() {
+            return this._mergeElem(this.getReportElements(), this._elemOverride);
+        },
+        // 当前报告生效的水印设置（计划覆盖优先，否则全局）
+        activeWatermark() {
+            return this._wmOverride ? { ...this.getWatermark(), ...this._wmOverride } : this.getWatermark();
+        },
+        getReportHeader(student) {
+            const sid = student.id;
+            const now = new Date();
+            const today = now.getFullYear() + '/' + (now.getMonth() + 1) + '/' + now.getDate();
+            const cur = this.activeReportElements(); // 计划若指定元素模板则优先，否则全局
+            // 兼容旧数据：早期报告元素按学员存于 evalReportHeader，全局未设置时回退
+            let legacy = {};
+            try { legacy = JSON.parse(localStorage.getItem('evalReportHeader') || '{}')[sid] || {}; } catch (e) { legacy = {}; }
+            // 学员 / 班级：始终自动带出真实数据（不允许在元素编辑中修改）；上课时间不再提供
+            return {
+                title: cur.title || legacy.title || '训练评估报告',
+                studentName: student.name,
+                className: Shared.getCurrentClassName(sid),
+                coach: cur.coach || legacy.coach || '',
+                date: cur.date || legacy.date || today,
+            };
         },
 
         // ============ 教练评语 ============
@@ -1574,23 +3400,17 @@
             try { return JSON.parse(localStorage.getItem('evalAIConfig') || '{}'); } catch (e) { return {}; }
         },
 
-        // 教练评语 AI 要求提示词（全局设置，随数据包一起发送/复制）
+        // 教练评语 AI 要求提示词（默认元素，随数据包一起发送/复制）
         getAIPrompt() {
-            const stored = localStorage.getItem('evalAIPrompt');
-            return (stored && stored.trim()) ? stored : this.DEFAULT_AI_PROMPT;
-        },
-        saveAIPrompt(text) {
-            localStorage.setItem('evalAIPrompt', text || '');
+            const p = this.getReportElements().aiPrompt;
+            return (p && String(p).trim()) ? p : this.DEFAULT_AI_PROMPT;
         },
 
-        // 教练评语 AI 数据说明（全局设置，描述数据结构，随数据包一起发送/复制）
-        DEFAULT_AI_DATA_NOTE: '以下为学员评估信息，各区块含义：\n- 学员信息：学员姓名、班级、教练、报告填写日期\n- 参赛记录：赛事、任务、得分（分）、用时（秒）、轮次、来源（正赛/模拟赛/自主训练）\n- 任务表现统计：各任务最佳分、练习次数、平均分、满分率、稳定性评级、综合评级\n- 量化评估（综合）：各维度/子维度 评分、参考值、同龄指数（= 评分÷参考值，超过100%表示高于同龄参考水平）\n- 现有教练评语：教练已填写的评语草稿（可为空）',
+        // 教练评语 AI 数据说明（默认元素，描述数据结构，随数据包一起发送/复制）
+        DEFAULT_AI_DATA_NOTE: '以下为学员评估信息，各区块含义：\n- 学员信息：学员姓名、班级、教练、报告填写日期\n- 参赛记录：赛事、任务、得分（分）、用时（秒）、轮次、来源（正赛/模拟赛/自主训练）\n- 任务表现统计：各任务最佳分、练习次数、平均分、满分率、稳定性评级、综合评级\n- 各任务趋势指标：按任务给出 满分率、用时样本、成绩预估（用时）、集中度（用时）、阶段变化（均为相对该学员自身，计算口径见该节内说明）\n- 量化评估（综合）：各维度/子维度 评分、参考值、同龄指数（= 评分÷参考值，超过100%表示高于同龄参考水平）\n- 现有教练评语：教练已填写的评语草稿（可为空）',
         getAIDataNote() {
-            const stored = localStorage.getItem('evalAIDataNote');
-            return (stored && stored.trim()) ? stored : this.DEFAULT_AI_DATA_NOTE;
-        },
-        saveAIDataNote(text) {
-            localStorage.setItem('evalAIDataNote', text || '');
+            const n = this.getReportElements().aiDataNote;
+            return (n && String(n).trim()) ? n : this.DEFAULT_AI_DATA_NOTE;
         },
 
         // 一键选用服务商预设，自动填入接口地址与模型
@@ -1649,6 +3469,51 @@
                 lines.push('（暂无任务数据）');
             }
             lines.push('');
+            // 【各任务趋势指标】与报告「各任务表现趋势」图右侧分析栏同一口径（同一批数据点、同一套算法）
+            lines.push('【各任务趋势指标】');
+            const model = student ? this._chartModel(student.id) : { positions: [], rows: [] };
+            const trendGroups = [];
+            const trendMap = {};
+            model.rows.forEach((rec) => {
+                if (!trendMap[rec.taskId]) {
+                    trendMap[rec.taskId] = { taskId: rec.taskId, name: rec.taskName || rec.taskId, points: [] };
+                    trendGroups.push(trendMap[rec.taskId]);
+                }
+                trendMap[rec.taskId].points.push(rec);
+            });
+            if (trendGroups.length) {
+                lines.push('统计范围：本次评估所选集训下的模拟赛 + 正赛（不含自主训练），按场次轮次展开，弃权轮次不计入。');
+                trendGroups.forEach((g) => {
+                    const task = (Shared.data.tasks || []).find((t) => t.id === g.taskId) || null;
+                    const a = this._taskAnalysis(g.points, task);
+                    const bits = [];
+                    if (a.score) {
+                        bits.push(a.score.fullRate == null
+                            ? '满分率 —（任务未设满分值）'
+                            : '满分率 ' + Math.round(a.score.fullRate * 100) + '%（' + a.score.full + '/' + a.score.n + '）');
+                    }
+                    if (a.time) {
+                        const t = a.time;
+                        bits.push('用时样本 ' + t.n + ' 次（' + (t.scope === 'full' ? '满分场次' : '含非满分场次') + '）');
+                        bits.push('成绩预估（用时）' + t.M.toFixed(1) + 's ± ' + (t.off != null ? t.off.toFixed(1) + 's' : '—'));
+                        bits.push('集中度（用时）' + (t.disp != null ? Math.round(t.disp * 100) + '%（' + (t.disp < 0.10 ? '集中' : (t.disp < 0.20 ? '一般' : '分散')) + '）' : '—'));
+                        if (t.stageDelta) {
+                            const d = t.stageDelta;
+                            bits.push('阶段变化 ' + (d.pct > 0 ? '变慢 ' : '变快 ') + Math.abs(d.pct * 100).toFixed(0) + '%（本期「' + d.curName + '」' + d.curM.toFixed(1) + 's vs 上期「' + d.prevName + '」' + d.prevM.toFixed(1) + 's）');
+                        }
+                    }
+                    lines.push('- ' + g.name + '：' + (bits.length ? bits.join('；') : '数据不足'));
+                });
+                lines.push('以上指标的计算口径：');
+                lines.push('· 满分率 = 得分达到「任务满分值」的场次数 ÷ 记录条数');
+                lines.push('· 用时样本 = 参与用时计算的样本数；优先只用「满分场次」的用时（满分场次 ≥2 条时），不足 2 条则退化为全部有用时的记录');
+                lines.push('· 成绩预估（用时）= 中位数 M ± 1.4826×MAD（中位绝对偏差）；M 是该学员的典型用时，± 是波动范围（约 68% 的用时落在此区间内），秒数越小表示越快');
+                lines.push('· 集中度（用时）= IQR（四分位距）÷ 中位数，即用时相对该学员自身的离散程度：<10% 集中、<20% 一般、≥20% 分散');
+                lines.push('· 阶段变化 = 最近一个集训的中位用时 ÷ 上一个集训的中位用时 − 1（只有 ≥2 个集训时才计算；变快＝更快）');
+            } else {
+                lines.push('（暂无可分析的成绩记录）');
+            }
+            lines.push('');
             lines.push('【量化评估（综合）】评分 / 参考值 / 同龄指数');
             if (sum && sum.dims.length) {
                 const pct = (score, ref) => (ref > 0 ? Math.round((score / ref) * 100) + '%' : '—');
@@ -1661,8 +3526,9 @@
                 lines.push('📊 综合评分：' + sum.score.toFixed(2) + ' / ' + sum.ref.toFixed(2) + ' / ' + pct(sum.score, sum.ref));
             }
             const dataText = lines.join('\n');
-            const aiPrompt = this.getAIPrompt();
-            const dataNote = this.getAIDataNote();
+            const el = this.activeReportElements();
+            const aiPrompt = el.aiPrompt || this.getAIPrompt();
+            const dataNote = el.aiDataNote || this.getAIDataNote();
             const coachComment = (this.getCoachComment() || '').trim();
             let full = aiPrompt + '\n\n【数据说明】\n' + dataNote + '\n\n【评估数据】\n' + dataText;
             if (coachComment) full += '\n\n【现有教练评语】\n' + coachComment;
@@ -1858,38 +3724,19 @@
                     </div>
                 </div>`;
 
-            // 模块二：训练数据分析（各任务表现，导出/预览显示）
+            // 模块二：训练数据分析（各任务表现 + 教练点评；填写与预览均显示，点评需在填写模式录入）
             const taskChartHtml = `
-                <div class="card report-preview-only" data-module="2" style="margin-top:0.75rem;">
+                <div class="card" data-module="2" style="margin-top:0.75rem;">
                     <div id="taskCharts"></div>
                 </div>`;
 
-            // 模块三：量化评估细则（填写模式下可编辑：维度/子维度/细则 可增删改；结构可存为模板复用）
+            // 模块三：量化评估细则（报告填写：只打分；结构由所选量化模板决定，编辑入口统一在「评估模板管理」）
             const quantHtml = `
                 <div class="card" data-module="3" style="margin-top:0.75rem;">
                     <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.5rem;">
                         <span style="font-size:0.98rem;font-weight:700;color:var(--gray-800);">📋 量化评估细则</span>
                         <span id="quantTotal" style="margin-left:auto;font-size:0.8rem;color:var(--gray-600);font-weight:600;"></span>
-                        <button type="button" class="btn btn-sm btn-outline" id="quantAddDimBtn" title="在末尾新增一个维度（自动命名+配色）">＋ 新增维度</button>
-                        <button type="button" class="btn btn-sm btn-outline" id="quantAddSubBtn" title="弹出选择父维度后新增子维度">＋ 新增子维度</button>
-                        <button type="button" class="btn btn-sm btn-outline" id="quantResetDefaultBtn" title="把当前学员结构恢复为「内置默认」（维度一/二/三 · 子维度一/二/三）">↩ 恢复默认</button>
-                        <span class="report-edit-only" style="display:inline-flex;align-items:center;gap:0.35rem;flex-wrap:wrap;">
-                            <span style="font-size:0.78rem;color:var(--gray-500);white-space:nowrap;">结构模板</span>
-                            <select id="quantStructTpl" title="下拉选择模板；点「设为默认」把选中模板设为下次打开本系统时的默认模板；点「▶ 套用」才应用到当前学员" style="max-width:200px;padding:0.25rem 0.4rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.8rem;background:#fff;color:var(--gray-800);">
-                                <option value="__default__">内置默认</option>
-                            </select>
-                            <button type="button" class="btn btn-sm btn-outline" id="quantTplSetDefault" title="把当前选中的模板设为默认：下次打开本系统时默认使用（内置默认=维度一/二/三 · 子维度一/二/三，用户不可修改）">设为默认</button>
-                            <button type="button" class="btn btn-sm btn-outline" id="quantTplApply" style="display:none;" title="把所选用户模板应用到当前学员（替换其结构并清空已打分）">▶ 套用</button>
-                            <button type="button" class="btn btn-sm btn-outline" id="quantTplSave" title="把当前整套结构存为可复用用户模板">💾 存为模板</button>
-                            <button type="button" class="btn btn-sm btn-outline" id="quantTplDel" style="display:none;" title="删除选中的用户模板">🗑</button>
-                        </span>
-                        <button type="button" class="btn btn-sm btn-outline" id="quantResetBtn">🔄 重置</button>
-                    </div>
-                    <div class="report-edit-only" id="quantTplSaveRow" style="display:none;align-items:center;gap:0.4rem;flex-wrap:wrap;margin-bottom:0.45rem;">
-                        <span style="font-size:0.8rem;color:var(--gray-600);white-space:nowrap;">模板名称</span>
-                        <input type="text" id="quantTplName" placeholder="如：机器人综合评估 V1" style="flex:1;min-width:160px;padding:0.3rem 0.5rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.82rem;" />
-                        <button type="button" class="btn btn-sm btn-primary" id="quantTplSaveConfirm">✔ 保存</button>
-                        <button type="button" class="btn btn-sm btn-outline" id="quantTplSaveCancel">取消</button>
+                        <button type="button" class="btn btn-sm btn-outline" id="quantResetBtn" title="清空本表所有得分（不影响结构）">🔄 重置得分</button>
                     </div>
                     <div id="quantTableContainer"></div>
                 </div>`;
@@ -1898,7 +3745,7 @@
             const competitionsHtml = this.renderCompetitions(student, trainings);
             const planHtml = this.renderCompetitionPlan(trainings);
             const quantSummaryHtml = this.buildQuantSummaryHtml(this.computeQuantSummary());
-            // 赛事经历（左，预览/导出显示）+ 赛事规划（右，填写模式下可编辑）并排两栏
+            // 赛事经历与赛事规划：均为只读区（内容来自系统记录 / 评估模板），填写界面不呈现，预览与导出显示
             const compColumns = [];
             if (competitionsHtml) compColumns.push(`
                     <div class="report-preview-only" style="flex:1;min-width:280px;">
@@ -1906,7 +3753,7 @@
                         ${competitionsHtml}
                     </div>`);
             if (planHtml) compColumns.push(`
-                    <div style="flex:1;min-width:220px;">
+                    <div class="report-preview-only" style="flex:1;min-width:220px;">
                         <div class="overview-sec-title">📅 赛事规划</div>
                         ${planHtml}
                     </div>`);
@@ -1947,33 +3794,231 @@
             return `${headerHtml}${module1Html}${taskChartHtml}${quantHtml}`;
         },
 
-        // ============ 各任务表现折线图（每任务一张图，得分+用时双线，不标注数值） ============
-        drawTaskChart(records, taskMap) {
+        // ============ 各任务表现折线图（每任务一张图，得分+用时双线，坐标轴标注数值） ============
+        // —— 单个任务的「得分」+「用时」分析：全部相对该学员自身，不引入外部标准 ——
+        // 计算某任务的得分/用时分析指标
+        _taskAnalysis(points, task) {
+            const S = Shared.stats;
+            const out = { score: null, time: null };
+            const maxScore = (task && task.maxScore) ? Number(task.maxScore) : null;
+            const scores = (points || []).map((p) => p.score).filter((v) => v != null);
+            // —— 得分：只看「满分率」（满分 = 任务设置的满分值，不涉及外部标准）——
+            if (scores.length) {
+                const full = maxScore ? scores.filter((v) => v === maxScore).length : 0;
+                out.score = {
+                    n: scores.length,
+                    full,
+                    fullRate: maxScore ? full / scores.length : null,
+                    hasMax: !!maxScore,
+                };
+            }
+            // —— 发挥（用时）：只用"满分场次"（非满分场次做少了自然快，用时不可比）——
+            const fullPts = maxScore ? (points || []).filter((p) => p.time != null && p.score === maxScore) : [];
+            const allPts = (points || []).filter((p) => p.time != null);
+            const scope = fullPts.length >= 2 ? 'full' : 'all';
+            const usePts = scope === 'full' ? fullPts : allPts;
+            const times = usePts.map((p) => Number(p.time));
+            if (times.length) {
+                const M = S.median(times);
+                const mad = S.mad(times);
+                const off = mad == null ? null : 1.4826 * mad;
+                const tmin = Math.min(...times);
+                const band = off == null ? null : { lo: Math.max(tmin, M - off), hi: M + off };
+                const iqr = S.iqr(times);
+                const disp = (M > 0 && iqr != null) ? iqr / M : null;
+                // 阶段变化：以「集训」为单位 —— 本期集训的中位用时 vs 上期集训（只有 1 个集训时不分析）
+                let stageDelta = null;
+                const gmap = {};
+                const groups = [];
+                usePts.forEach((p) => {
+                    const key = p.trainingId || '__none__';
+                    if (!gmap[key]) {
+                        gmap[key] = { key, name: p.trainingName || '', times: [], lastDate: '' };
+                        groups.push(gmap[key]);
+                    }
+                    gmap[key].times.push(Number(p.time));
+                    if (p.date && p.date !== '-' && p.date > gmap[key].lastDate) gmap[key].lastDate = String(p.date);
+                });
+                if (groups.length >= 2) {
+                    groups.sort((x, y) => String(x.lastDate).localeCompare(String(y.lastDate)));
+                    const cur = groups[groups.length - 1];
+                    const prev = groups[groups.length - 2];
+                    const m1 = S.median(cur.times);
+                    const m2 = S.median(prev.times);
+                    if (m1 != null && m2) {
+                        stageDelta = {
+                            pct: (m1 - m2) / m2,
+                            curName: cur.name || '本期集训', curM: m1, curN: cur.times.length,
+                            prevName: prev.name || '上期集训', prevM: m2, prevN: prev.times.length,
+                        };
+                    }
+                }
+                out.time = { n: times.length, scope, M, off, band, tmin, iqr, disp, stageDelta, sd: S.sd(times), mean: S.mean(times) };
+            }
+            return out;
+        },
+        // 分析栏 HTML（右侧竖排：标签 + 数值，每行带 title 说明）
+        _taskAnalysisHtml(a) {
+            const pct = (v, d) => (v == null ? '—' : (v * 100).toFixed(d == null ? 0 : d) + '%');
+            const sec = (v) => (v == null ? '—' : v.toFixed(1) + 's');
+            const row = (k, v, opt) => `<div title="${(opt && opt.tip) ? opt.tip.replace(/"/g, '&quot;') : ''}" style="display:flex;justify-content:space-between;gap:0.4rem;font-size:0.74rem;color:var(--gray-600);line-height:1.5;${(opt && opt.tip) ? 'cursor:help;' : ''}"><span style="white-space:nowrap;">${k}</span><b style="font-weight:600;color:${(opt && opt.color) || 'var(--gray-800)'};text-align:right;">${v}</b></div>`;
+            let rows = '';
+            if (a.score) {
+                const s = a.score;
+                const val = s.fullRate == null
+                    ? '—（任务未设满分）'
+                    : `${pct(s.fullRate)} <span style="font-weight:400;color:var(--gray-400);">(${s.full}/${s.n})</span>`;
+                rows += row('满分率', val, { tip: `满分次数 ÷ 记录条数 = ${s.full} / ${s.n}；满分指达到任务设置的满分值` });
+            }
+            if (a.time) {
+                const t = a.time;
+                rows += row(t.scope === 'full' ? '满分用时样本' : '用时样本（含非满分）', `${t.n} 次`, {
+                    tip: t.scope === 'full'
+                        ? '只用"满分场次"的用时：非满分场次做少了自然更快，用时不可比'
+                        : '该任务没有足够的满分记录，暂用全部有用时的记录（仅供参考）',
+                });
+                rows += row('成绩预估（用时）', `${sec(t.M)} <span style="font-weight:400;color:inherit;">±${t.off != null ? t.off.toFixed(1) + 's' : '—'}</span>`, {
+                    tip: `典型用时（中位数）± 偏差（1.4826×MAD，≈68% 的满分用时落在此范围）；本次实际范围约 ${t.band ? sec(t.band.lo) + ' ~ ' + sec(t.band.hi) : '样本不足'}，个人最快 ${sec(t.tmin)}`,
+                });
+                rows += row('集中度（用时）', t.disp == null ? '—' : `${pct(t.disp)} <span style="font-weight:400;color:var(--gray-400);">${t.disp < 0.10 ? '集中' : (t.disp < 0.20 ? '一般' : '分散')}</span>`, { tip: 'IQR ÷ 中位数 = 相对自身离散度；越小越集中（<10% 集中，<20% 一般）' });
+                if (t.stageDelta) {
+                    const d = t.stageDelta;
+                    const slower = d.pct > 0;
+                    rows += row('阶段变化', `${slower ? '变慢' : '变快'} ${pct(Math.abs(d.pct))}`, {
+                        tip: `以集训为单位：本期「${d.curName}」中位 ${sec(d.curM)}（${d.curN} 次）vs 上期「${d.prevName}」中位 ${sec(d.prevM)}（${d.prevN} 次）；只在有 ≥2 个集训时分析`,
+                        color: Math.abs(d.pct) < 0.05 ? 'var(--gray-800)' : (slower ? '#dc2626' : '#16a34a'),
+                    });
+                }
+            }
+            return rows || '<div style="font-size:0.74rem;color:var(--gray-400);">数据不足</div>';
+        },
+        // ============ 任务/赛事点评（每个任务一条，按学员保存） ============
+        getTaskComments() {
+            const sid = this.selectedStudentId;
+            if (!sid) return {};
+            try { return JSON.parse(localStorage.getItem('evalTaskComments') || '{}')[sid] || {}; } catch (e) { return {}; }
+        },
+        getTaskComment(tid) { return this.getTaskComments()[tid] || ''; },
+        saveTaskComment(tid, text) {
+            const sid = this.selectedStudentId;
+            if (!sid || !tid) return;
+            let all = {};
+            try { all = JSON.parse(localStorage.getItem('evalTaskComments') || '{}'); } catch (e) { all = {}; }
+            if (!all[sid]) all[sid] = {};
+            const v = (text || '').trim();
+            if (v) all[sid][tid] = v; else delete all[sid][tid];
+            try { localStorage.setItem('evalTaskComments', JSON.stringify(all)); } catch (e) { /* ignore */ }
+        },
+        // 单个任务点评（填写=输入框，预览=纯文本；空点评在预览时整块省略）——置于指标面板内、指标下方
+        taskCommentHtml(tid) {
+            const text = this.getTaskComment(tid);
+            const box = 'margin-top:0.35rem;padding-top:0.35rem;border-top:1px dashed var(--gray-200);';
+            const label = '<div style="font-size:0.74rem;font-weight:600;color:var(--gray-500);margin-bottom:0.2rem;">📝 教练点评</div>';
+            if (this.viewMode === 'preview') {
+                if (!text) return '';
+                return `<div style="${box}">${label}<div style="font-size:0.78rem;color:var(--gray-700);line-height:1.6;white-space:pre-wrap;">${Shared.escapeHtml(text)}</div></div>`;
+            }
+            return `<div style="${box}">${label}<textarea data-task-comment="${Shared.escapeHtml(tid)}" rows="2" placeholder="本任务（赛事）点评…" style="width:100%;padding:0.3rem 0.45rem;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:0.78rem;line-height:1.55;font-family:inherit;resize:vertical;box-sizing:border-box;">${Shared.escapeHtml(text)}</textarea></div>`;
+        },
+        // 按视图模式重渲染所有任务点评区（填写=输入框，预览=文本）
+        refreshTaskCommentMode() {
+            const box = document.getElementById('taskCharts');
+            if (!box) return;
+            // 先落盘当前输入框内容，避免切换视图时丢字
+            box.querySelectorAll('textarea[data-task-comment]').forEach((ta) => this.saveTaskComment(ta.dataset.taskComment, ta.value));
+            box.querySelectorAll('[data-task-comment-box]').forEach((el) => {
+                el.innerHTML = this.taskCommentHtml(el.dataset.taskCommentBox);
+            });
+        },
+        // —— 折线图数据：口径与「集训管理 → 学员成绩详情 → 趋势」保持一致 ——
+        // 时间轴 = 已选集训下所有场次按日期排序、每场按轮次展开（所有任务共用这条时间轴）
+        // 每个数据点 = 某任务在「某场次的某一轮」的成绩；弃权轮次不计入；自主训练（练习）暂不纳入
+        _chartModel(studentId) {
+            const D = Shared.data;
+            const taskMap = {};
+            (D.tasks || []).forEach((t) => { taskMap[t.id] = t; });
+            const positions = []; // 时间轴上的每个位置 = 一场比赛的一轮
+            const rows = [];
+            (this.getSelectedTrainings() || []).forEach((training) => {
+                const mocks = [...(training.mockCompetitions || [])]
+                    .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+                mocks.forEach((m) => {
+                    if (m.withdrawn && m.withdrawn[studentId]) return;
+                    const ss = m.scores && m.scores[studentId];
+                    if (!ss) return;
+                    // 该场次的最大轮次（与成绩详情一致：同一场次所有任务共用轮次位置）
+                    let maxRounds = 0;
+                    Object.entries(ss).forEach(([tid, entry]) => {
+                        if (!taskMap[tid]) return;
+                        const n = Shared.getRounds(entry).length;
+                        if (n > maxRounds) maxRounds = n;
+                    });
+                    const compType = Shared.getMockType(m);
+                    for (let ri = 0; ri < maxRounds; ri += 1) {
+                        const pos = positions.length;
+                        const roundLabel = maxRounds > 1 ? `第${ri + 1}轮` : '';
+                        positions.push({
+                            trainingId: training.id,
+                            trainingName: training.name || '',
+                            compName: m.name || '',
+                            date: m.date || '',
+                            roundLabel,
+                            compType,
+                            label: roundLabel ? `${m.name || ''}(${roundLabel})` : (m.name || ''),
+                        });
+                        Object.entries(ss).forEach(([tid, entry]) => {
+                            const task = taskMap[tid];
+                            if (!task) return;
+                            const r = Shared.getRounds(entry)[ri];
+                            if (!r || r.withdrawn) return; // 弃权轮次不计入（与成绩详情一致）
+                            const score = (r.score === undefined || r.score === null) ? null : r.score;
+                            const time = (r.time === undefined || r.time === null) ? null : r.time;
+                            if (score === null && time === null) return;
+                            rows.push({
+                                taskId: tid,
+                                taskName: task.name,
+                                pos,
+                                score,
+                                time,
+                                date: m.date || '',
+                                trainingId: training.id,
+                                trainingName: training.name || '',
+                                compType,
+                                compName: m.name || '',
+                            });
+                        });
+                    }
+                });
+            });
+            return { positions, rows, taskMap };
+        },
+        drawTaskChart(model, taskMap) {
             const container = document.getElementById('taskCharts');
             if (!container) return;
+            const positions = (model && model.positions) || [];
+            const records = (model && model.rows) || [];
+            const n = positions.length;
 
-            // 按任务分组（保持记录先后顺序），仅保留有数据的任务
+            // 按任务分组：各任务共用同一条时间轴（同一场次在每个任务的图里 x 位置一致）
             const order = [];
             const seen = {};
             const series = {};
-            const colors = ['#2563eb', '#f59e0b', '#10b981', '#7c3aed', '#ef4444', '#0891b2', '#65a30d'];
-            const SCORE_COLOR = '#2563eb'; // 得分线统一蓝色实线
-            const TIME_COLOR = '#64748b'; // 用时线统一灰色虚线
+            const colors = ['#2563eb', '#f59e0b', '#10b981', '#7c3aed', '#0891b2', '#65a30d'];
+            const SCORE_COLOR = '#2563eb'; // 得分线统一蓝色实线（得分刻度同色）
+            const TIME_COLOR = '#d97706'; // 用时线统一橙色虚线（用时刻度同色）
+            const TIME_AXIS_MAX = 150; // 用时轴固定刻度：0~150s（数据超过时自动扩展）
+            const OFFICIAL_COLOR = '#ef4444'; // 正赛：显眼的红点
             records.forEach((rec) => {
-                if (rec.score == null) return;
                 const tid = rec.taskId;
-                const task = taskMap[tid] || null;
                 if (!seen[tid]) {
                     seen[tid] = true;
                     order.push(tid);
-                    series[tid] = {
-                        name: rec.taskName || (task ? task.name : tid),
-                        color: colors[(order.length - 1) % colors.length],
-                        points: [],
-                        max: task ? (task.maxScore || null) : null,
-                    };
+                    series[tid] = { name: rec.taskName || tid, points: [], firstDate: '' };
                 }
-                series[tid].points.push({ score: rec.score, time: rec.time != null ? rec.time : null });
+                const s = series[tid];
+                const pdate = rec.date || '';
+                if (pdate && (!s.firstDate || pdate < s.firstDate)) s.firstDate = pdate;
+                s.points.push(rec);
             });
 
             if (order.length === 0) {
@@ -1981,72 +4026,88 @@
                 return;
             }
 
-            // 每个任务一块：左侧折线图 + 右侧数据统计（平均数 / 标准差）
+            // 任务顺序：基础任务置顶，其余按首次记录时间先后排序
+            const isBasic = (k) => !!(taskMap[k] && taskMap[k].type === 'basic');
+            const firstOf = (k) => series[k].firstDate || '9999-99-99';
+            order.sort((a, b) => {
+                const ba = isBasic(a) ? 0 : 1;
+                const bb = isBasic(b) ? 0 : 1;
+                if (ba !== bb) return ba - bb;
+                const fa = firstOf(a);
+                const fb = firstOf(b);
+                if (fa !== fb) return fa < fb ? -1 : 1;
+                return String(series[a].name).localeCompare(String(series[b].name), 'zh');
+            });
+
+            // 每个任务一块：左侧折线图 + 右侧分析栏（全部相对该学员自身）
             container.innerHTML = order.map((tid, i) => {
                 const s = series[tid];
+                const color = colors[i % colors.length];
                 const hasTime = s.points.some((p) => p.time != null);
-                const scores = s.points.map((p) => p.score);
-                const n = scores.length;
-                const avg = n > 0 ? scores.reduce((a, b) => a + b, 0) / n : null;
-                const std = n > 0 ? Math.sqrt(scores.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / n) : null;
+                const hasOfficial = s.points.some((p) => p.compType === 'official');
+                const trNames = [];
+                s.points.forEach((p) => { if (p.trainingName && !trNames.includes(p.trainingName)) trNames.push(p.trainingName); });
+                const ana = this._taskAnalysis(s.points, taskMap[tid] || null);
                 return `
                     <div class="task-chart-block" style="margin-top:0.75rem;">
                         <div style="display:flex;align-items:center;gap:0.4rem;font-size:0.85rem;color:var(--gray-700);font-weight:600;margin-bottom:0.25rem;flex-wrap:wrap;justify-content:space-between;">
                             <span style="display:inline-flex;align-items:center;gap:0.3rem;flex-wrap:wrap;">
                                 <span style="display:inline-flex;align-items:center;gap:0.3rem;">
-                                    <span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:${s.color};"></span>
+                                    <span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:${color};"></span>
                                     ${Shared.escapeHtml(s.name)}
                                 </span>
-                                <span style="display:inline-flex;align-items:center;gap:0.3rem;font-weight:500;font-size:0.75rem;color:var(--gray-500);margin-left:0.75rem;">
+                                <span style="display:inline-flex;align-items:center;gap:0.3rem;font-weight:500;font-size:0.75rem;color:var(--gray-500);margin-left:0.75rem;" title="蓝色实线=得分（越高越好）">
                                     <span style="display:inline-block;width:12px;height:2px;background:${SCORE_COLOR};"></span> 得分
                                 </span>
-                                ${hasTime ? `<span style="display:inline-flex;align-items:center;gap:0.3rem;font-weight:500;font-size:0.75rem;color:var(--gray-500);">
+                                ${hasTime ? `<span style="display:inline-flex;align-items:center;gap:0.3rem;font-weight:500;font-size:0.75rem;color:var(--gray-500);" title="橙色虚线=用时（0s 在最下，秒数越大越高）">
                                     <span style="display:inline-block;width:12px;height:0;border-top:2px dashed ${TIME_COLOR};"></span> 用时
                                 </span>` : ''}
+                                ${hasOfficial ? `<span style="display:inline-flex;align-items:center;gap:0.3rem;font-weight:500;font-size:0.75rem;color:var(--gray-500);" title="红点=正赛（一场正赛的得分与用时各标一个红点）；模拟赛/练习为普通点">
+                                    <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${OFFICIAL_COLOR};border:1.5px solid #fff;box-shadow:0 0 0 1px ${OFFICIAL_COLOR};"></span> 正赛
+                                </span>` : ''}
+                                ${trNames.length >= 2 ? `<span style="display:inline-flex;align-items:center;gap:0.3rem;font-weight:500;font-size:0.75rem;color:var(--gray-500);" title="竖向虚线=集训分界">
+                                    <span style="display:inline-block;width:0;height:11px;border-left:1px dashed #94a3b8;"></span> 集训分界
+                                </span>` : ''}
                             </span>
-                            <span style="font-size:0.78rem;color:var(--gray-400);font-weight:500;">数据统计</span>
+                            <span style="font-size:0.78rem;color:var(--gray-400);font-weight:500;">分析（相对该学员自身）</span>
                         </div>
                         <div style="display:flex;gap:1rem;align-items:stretch;">
                             <div class="task-chart-canvas" style="flex:1;min-width:0;height:180px;position:relative;border:1px solid var(--gray-100);border-radius:var(--radius-sm);background:var(--gray-50);">
                                 <canvas data-task-index="${i}"></canvas>
                             </div>
-                            <div style="width:180px;flex-shrink:0;border:1px solid var(--gray-100);border-radius:var(--radius-sm);background:var(--gray-50);padding:0.5rem 0.7rem;display:flex;flex-direction:column;justify-content:center;">
-                                <div style="display:flex;justify-content:space-between;font-size:0.8rem;color:var(--gray-600);padding:0.25rem 0;">
-                                    <span>平均数</span><span style="font-weight:600;color:var(--gray-800);">${avg != null ? avg.toFixed(1) : '—'}</span>
-                                </div>
-                                <div style="display:flex;justify-content:space-between;font-size:0.8rem;color:var(--gray-600);padding:0.25rem 0;">
-                                    <span>标准差</span><span style="font-weight:600;color:var(--gray-800);">${std != null ? std.toFixed(1) : '—'}</span>
-                                </div>
-                            </div>
+                            <div style="width:250px;flex-shrink:0;border:1px solid var(--gray-100);border-radius:var(--radius-sm);background:var(--gray-50);padding:0.45rem 0.6rem;display:flex;flex-direction:column;justify-content:flex-start;align-items:stretch;">${this._taskAnalysisHtml(ana)}<div data-task-comment-box="${Shared.escapeHtml(tid)}">${this.taskCommentHtml(tid)}</div></div>
                         </div>
                     </div>`;
             }).join('');
 
-            const allScores = order.reduce((a, tid) => a.concat(series[tid].points.map((p) => p.score)), []);
-            const globalMax = allScores.length ? Math.max(...allScores) : 1;
             if (!this._chartResizeHandlers) this._chartResizeHandlers = {};
+            if (!this._chartResizeObservers) this._chartResizeObservers = {};
 
             order.forEach((tid, i) => {
                 const s = series[tid];
                 const canvas = container.querySelector(`canvas[data-task-index="${i}"]`);
                 const wrap = canvas ? canvas.parentElement : null;
                 if (!canvas || !wrap) return;
-                const scoreNorm = (v) => {
-                    const max = s.max || globalMax;
-                    return max > 0 ? Math.max(0, Math.min(1, v / max)) : 0;
-                };
-                const times = s.points.map((p) => p.time).filter((t) => t != null);
-                const maxT = times.length ? Math.max(...times) : null;
-                const minT = times.length ? Math.min(...times) : null;
-                const timeNorm = (t) => {
-                    if (maxT == null || minT == null) return 1;
-                    return maxT === minT ? 1 : Math.max(0, Math.min(1, (maxT - t) / (maxT - minT)));
-                };
+                const hasTime = s.points.some((p) => p.time != null);
+                // 本任务图刻度：得分轴 0~实测最高分；用时轴固定 0~150s（超过 150s 自动扩展，避免裁切）
+                let scoreMax = 0, timeMax = TIME_AXIS_MAX;
+                s.points.forEach((p) => {
+                    if (p.score != null && p.score > scoreMax) scoreMax = p.score;
+                    if (p.time != null && p.time > timeMax) timeMax = p.time;
+                });
+                scoreMax = Math.max(scoreMax, 1);
+                const scoreNorm = (v) => Math.max(0, Math.min(1, v / scoreMax));
+                // 用时：0s 在最下，用时越长画得越高（与右侧刻度一致）
+                const timeNorm = (t) => Math.max(0, Math.min(1, t / timeMax));
 
+                let drawnW = -1;
                 const draw = () => {
                     const dpr = window.devicePixelRatio || 1;
                     const rect = wrap.getBoundingClientRect();
                     const W = Math.max(rect.width, 120);
+                    // 尺寸未变则不重绘（避免 ResizeObserver 自激）
+                    if (Math.abs(W - drawnW) < 0.5 && canvas.width === Math.round(W * dpr)) return;
+                    drawnW = W;
                     const H = 180;
                     canvas.width = W * dpr;
                     canvas.height = H * dpr;
@@ -2056,8 +4117,22 @@
                     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
                     ctx.clearRect(0, 0, W, H);
 
-                    const padL = 16, padR = 16, padT = 14, padB = 14;
+                    const padL = 34, padR = 48, padT = 14, padB = 14;
                     const cw = W - padL - padR, ch = H - padT - padB;
+                    const yAt = (v) => padT + (1 - v) * ch;
+
+                    // 坐标轴刻度：左=得分（分，蓝色，同得分线），右=用时（秒，橙色，0s 在最下、越大越靠上）
+                    ctx.font = '9px sans-serif';
+                    [0, 0.5, 1].forEach((g) => {
+                        const y = padT + (1 - g) * ch;
+                        ctx.fillStyle = SCORE_COLOR;
+                        ctx.textAlign = 'right';
+                        ctx.fillText(String(Math.round(scoreMax * g)), padL - 5, y + 3);
+                        ctx.fillStyle = TIME_COLOR;
+                        ctx.textAlign = 'left';
+                        ctx.fillText((timeMax * g).toFixed(0) + 's', W - padR + 5, y + 3);
+                    });
+                    ctx.textAlign = 'left';
 
                     // 网格（25% / 50% / 75% / 100%）
                     ctx.strokeStyle = '#eef2f7';
@@ -2071,13 +4146,52 @@
                     });
 
                     const pts = s.points;
-                    if (pts.length === 0) return;
-                    const n = pts.length;
-                    const xAt = (i2) => padL + (n === 1 ? cw / 2 : (i2 / (n - 1)) * cw);
-                    const yAt = (v) => padT + (1 - v) * ch;
+                    if (n === 0) return;
+                    const xAt = (k) => padL + (n === 1 ? cw / 2 : (k / (n - 1)) * cw);
+
+                    // 集训分隔（各任务共用同一条时间轴，故分界位置逐图一致）：竖向虚线 + 各集训名；先画，保证数据线在上层
+                    if (n > 1) {
+                        const bounds = [];
+                        for (let k = 1; k < n; k += 1) {
+                            if ((positions[k].trainingId || '') !== (positions[k - 1].trainingId || '')) bounds.push(k);
+                        }
+                        if (bounds.length) {
+                            const segs = [];
+                            let start = 0;
+                            bounds.forEach((k) => { segs.push([start, k - 1]); start = k; });
+                            segs.push([start, n - 1]);
+                            // 分界竖线（画在两点之间）
+                            ctx.save();
+                            ctx.strokeStyle = '#94a3b8';
+                            ctx.lineWidth = 1;
+                            ctx.setLineDash([4, 3]);
+                            bounds.forEach((k) => {
+                                const x = (xAt(k - 1) + xAt(k)) / 2;
+                                ctx.beginPath();
+                                ctx.moveTo(x, padT);
+                                ctx.lineTo(x, padT + ch);
+                                ctx.stroke();
+                            });
+                            ctx.restore();
+                            // 集训名（各自段落顶部，过窄则不显示文字）
+                            segs.forEach(([a, b]) => {
+                                const name = positions[a].trainingName || '';
+                                if (!name) return;
+                                const span = xAt(b) - xAt(a);
+                                if (span < 46) return;
+                                const maxChars = Math.max(2, Math.floor(span / 11));
+                                const txt = name.length > maxChars ? name.slice(0, maxChars) + '…' : name;
+                                ctx.fillStyle = '#94a3b8';
+                                ctx.font = '10px sans-serif';
+                                ctx.textAlign = 'left';
+                                ctx.fillText(txt, xAt(a) + 2, padT + 9);
+                            });
+                        }
+                    }
 
                     // 通用画线：得分线（实线）/ 用时线（虚线）
-                    const drawLine = (getVal, color, dash) => {
+                    const drawLine = (getVal, color, dash, markOfficial) => {
+                        // markOfficial=true 时，该条线上遇到正赛数据点即标红
                         ctx.strokeStyle = color;
                         ctx.lineWidth = 2;
                         ctx.lineJoin = 'round';
@@ -2085,10 +4199,10 @@
                         if (dash) ctx.setLineDash([5, 4]); else ctx.setLineDash([]);
                         ctx.beginPath();
                         let started = false;
-                        pts.forEach((p, k) => {
+                        pts.forEach((p) => {
                             const v = getVal(p);
                             if (v == null) return;
-                            const x = xAt(k);
+                            const x = xAt(p.pos);
                             const y = yAt(v);
                             if (!started) { ctx.moveTo(x, y); started = true; }
                             else ctx.lineTo(x, y);
@@ -2096,32 +4210,42 @@
                         ctx.stroke();
                         ctx.setLineDash([]);
 
-                        // 数据点
-                        pts.forEach((p, k) => {
+                        // 数据点：正赛在该线上的点标红（得分线/用时线各有一个），其余用线色
+                        pts.forEach((p) => {
                             const v = getVal(p);
                             if (v == null) return;
-                            const x = xAt(k);
+                            const x = xAt(p.pos);
                             const y = yAt(v);
+                            const official = p.compType === 'official';
+                            const isRed = official && markOfficial;
                             ctx.beginPath();
-                            ctx.arc(x, y, 3, 0, Math.PI * 2);
-                            ctx.fillStyle = color;
+                            ctx.arc(x, y, isRed ? 4.5 : 3, 0, Math.PI * 2);
+                            ctx.fillStyle = isRed ? OFFICIAL_COLOR : color;
                             ctx.fill();
                             ctx.strokeStyle = '#fff';
-                            ctx.lineWidth = 1;
+                            ctx.lineWidth = isRed ? 1.5 : 1;
                             ctx.stroke();
                         });
                     };
 
-                    // 先画用时线（统一灰色虚线，该任务有用时数据才画）
-                    if (times.length) drawLine((p) => (p.time != null ? timeNorm(p.time) : null), TIME_COLOR, true);
-                    // 再画得分线（统一蓝色实线，后绘制使其在重叠处位于上方）
-                    drawLine((p) => scoreNorm(p.score), SCORE_COLOR, false);
+                    // 先画用时线（统一灰色虚线，该任务有用时数据才画；正赛红点在此标）
+                    if (hasTime) drawLine((p) => (p.time != null ? timeNorm(p.time) : null), TIME_COLOR, true, true);
+                    // 再画得分线（统一蓝色实线，后绘制使其在重叠处位于上方；正赛红点在此标）
+                    drawLine((p) => (p.score != null ? scoreNorm(p.score) : null), SCORE_COLOR, false, true);
                 };
 
+                // 尺寸变化（含从隐藏→显示）时自动重绘，保证折线铺满可用宽度
                 if (this._chartResizeHandlers[tid]) window.removeEventListener('resize', this._chartResizeHandlers[tid]);
+                if (this._chartResizeObservers[tid]) this._chartResizeObservers[tid].disconnect();
                 this._chartResizeHandlers[tid] = draw;
                 window.addEventListener('resize', this._chartResizeHandlers[tid]);
-                draw();
+                if (typeof ResizeObserver !== 'undefined') {
+                    const ro = new ResizeObserver(() => draw());
+                    ro.observe(wrap);
+                    this._chartResizeObservers[tid] = ro;
+                }
+                if (typeof requestAnimationFrame === 'function') requestAnimationFrame(draw);
+                else draw();
             });
         },
 
@@ -2237,12 +4361,312 @@
             all[name] = JSON.parse(JSON.stringify(tpl)); // 深拷贝，避免后续修改污染模板
             localStorage.setItem('evalQuantStructureTemplates', JSON.stringify(all));
         },
+        // ============ 模板关联「项目」（赛项/数据集）：选择模板时自动带入评估范围 ============
+        getTemplateMeta() {
+            try { return JSON.parse(localStorage.getItem('evalQuantTemplateMeta') || '{}'); } catch (e) { return {}; }
+        },
+        saveTemplateMeta(meta) {
+            try { localStorage.setItem('evalQuantTemplateMeta', JSON.stringify(meta)); } catch (e) { /* ignore */ }
+        },
+        templateProjects(name) {
+            const m = this.getTemplateMeta();
+            return (m[name] && Array.isArray(m[name].projects)) ? m[name].projects.slice() : [];
+        },
+        setTemplateProjects(name, projects) {
+            const meta = this.getTemplateMeta();
+            if (!projects || !projects.length) { if (meta[name]) delete meta[name]; }
+            else meta[name] = { projects: projects.slice() };
+            this.saveTemplateMeta(meta);
+        },
+        // 关联集训名称文案
+        getScopeOptionLabel(id) {
+            const t = (Shared.data.trainings || []).find((x) => x.id === id);
+            return t ? (t.name || '（未命名集训）') : id;
+        },
+        // 把「关联集训」应用到当前评估范围（= 这些集训下的全部练习/赛项记录）
+        _applyScopeProjects(ids) {
+            if (!ids || !ids.length) return false;
+            const tr = Shared.data.trainings || [];
+            const chosen = tr.filter((t) => ids.includes(t.id));
+            if (!chosen.length) return false;
+            this.selectedTrainingIds = chosen.map((t) => t.id);
+            // 覆盖所选集训下的全部数据集（练习/赛项）
+            const mock = new Set();
+            let hasPractice = false;
+            chosen.forEach((t) => {
+                if ((t.practiceRecords || []).length) hasPractice = true;
+                (t.mockCompetitions || []).forEach((m) => mock.add(m.id));
+            });
+            this.selectedMockIds = this.getDataOptions()
+                .filter((o) => (o.value === 'practice' ? hasPractice : mock.has(o.value)))
+                .map((o) => o.value);
+            this.updateScopeSummary();
+            return true;
+        },
+        // 填充「量化结构模板」下拉（不含“保留当前结构”选项）
+        _fillTemplateOptions(sel, selected) {
+            if (!sel) return;
+            const tpls = this.getQuantStructTemplates() || {};
+            const dl = this.getDefaultLoadName();
+            let html = '<option value="__default__">内置默认</option>';
+            Object.keys(tpls).forEach((n) => {
+                if (this.isReservedStructName(n)) return;
+                html += `<option value="${Shared.escapeHtml(n)}">${(n === dl ? '★ ' : '')}${Shared.escapeHtml(n)}</option>`;
+            });
+            sel.innerHTML = html;
+            if (selected && (selected === '__default__' || tpls[selected])) sel.value = selected;
+        },
+        // 计划弹窗：PDF 水印模板下拉（'' = 沿用当前水印设置）
+        _fillWatermarkTplOptions(sel, selected) {
+            if (!sel) return;
+            const tpls = this.getWatermarkTemplates() || {};
+            let html = '<option value="">当前水印设置</option>';
+            Object.keys(tpls).forEach((n) => { html += `<option value="${Shared.escapeHtml(n)}">${Shared.escapeHtml(n)}</option>`; });
+            sel.innerHTML = html;
+            sel.value = (selected && tpls[selected]) ? selected : '';
+        },
         deleteStructureTemplate(name) {
+            if (this.templateReferenced(name)) {
+                this.toast(`模板「${name}」已被历史报告引用，处于只读状态，不可删除`, 'warning');
+                return;
+            }
             const all = this.getQuantStructTemplates();
             if (Object.prototype.hasOwnProperty.call(all, name)) {
                 delete all[name];
                 localStorage.setItem('evalQuantStructureTemplates', JSON.stringify(all));
+                // 同步清理该模板关联的项目元数据
+                const meta = this.getTemplateMeta();
+                if (meta[name]) { delete meta[name]; this.saveTemplateMeta(meta); }
             }
+        },
+        // ============ 量化结构模板导出（多选 → JSON 下载） ============
+        openQuantExportModal() {
+            this.renderQuantExportList();
+            const wmRow = document.getElementById('quantTplExportWmRow');
+            if (wmRow) wmRow.style.display = Object.keys(this.getWatermarkTemplates() || {}).length ? 'flex' : 'none';
+            const m = document.getElementById('quantTplExportModal');
+            if (m) m.classList.add('open');
+        },
+        closeQuantExportModal() {
+            const m = document.getElementById('quantTplExportModal');
+            if (m) m.classList.remove('open');
+        },
+        // 列出可导出的用户模板（勾选；内置默认不参与）
+        renderQuantExportList() {
+            const box = document.getElementById('quantTplExportList');
+            if (!box) return;
+            const tpls = this.getQuantStructTemplates() || {};
+            const names = Object.keys(tpls).filter((n) => !this.isReservedStructName(n));
+            if (!names.length) {
+                box.innerHTML = '<div style="font-size:0.85rem;color:var(--gray-400);padding:0.3rem 0;">暂无可导出的用户模板（可在上方「＋ 以当前结构新建模板」创建）</div>';
+                return;
+            }
+            box.innerHTML = names.map((n) => `
+                <label><input type="checkbox" value="${Shared.escapeHtml(n)}" checked /> ${Shared.escapeHtml(n)}</label>
+            `).join('');
+        },
+        confirmQuantExport() {
+            const checks = Array.from(document.querySelectorAll('#quantTplExportList input[type="checkbox"]:checked'));
+            const names = checks.map((c) => c.value);
+            if (!names.length) { this.toast('请至少勾选一个要导出的模板', 'warning'); return; }
+            const tpls = this.getQuantStructTemplates() || {};
+            const data = { app: 'evaluation', type: 'quantStructureTemplates', version: 2, exportedAt: new Date().toISOString(), templates: {} };
+            names.forEach((n) => { if (tpls[n]) data.templates[n] = tpls[n]; });
+            // 附带所选模板关联的集训与报告元素（含赛事规划，若有）
+            const meta = this.getTemplateMeta();
+            const tProj = {};
+            const tElem = {};
+            names.forEach((n) => {
+                if (meta[n] && meta[n].projects && meta[n].projects.length) tProj[n] = meta[n].projects.slice();
+                const el = this.getTemplateElementsRaw(n);
+                if (Object.keys(el).length) tElem[n] = el;
+            });
+            if (Object.keys(tProj).length) data.templateProjects = tProj;
+            if (Object.keys(tElem).length) data.templateElements = tElem;
+            // 可选：一并导出 PDF 水印模板
+            const wmCb = document.getElementById('quantTplExportWm');
+            const wms = this.getWatermarkTemplates() || {};
+            if (wmCb && wmCb.checked && Object.keys(wms).length) data.watermarkTemplates = wms;
+            const json = JSON.stringify(data, null, 2);
+            const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+            const a = document.createElement('a');
+            const d = new Date();
+            const pad = (x) => String(x).padStart(2, '0');
+            a.href = URL.createObjectURL(blob);
+            a.download = `评估模板_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.json`;
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => { try { URL.revokeObjectURL(a.href); } catch (e) {} }, 1000);
+            this.closeQuantExportModal();
+            const wmN = data.watermarkTemplates ? Object.keys(data.watermarkTemplates).length : 0;
+            this.toast(`已导出 ${names.length} 个评估模板${wmN ? ' + ' + wmN + ' 个水印模板' : ''}`);
+        },
+        // ============ 评估模板导入（JSON 文件 → 新增 / 覆盖同名）============
+        openQuantImportPicker() {
+            const f = document.getElementById('tplMgmtImportFile');
+            if (f) { f.value = ''; f.click(); }
+        },
+        // 读取文件并解析（供 #tplMgmtImportFile 使用）
+        importTemplateFile(file) {
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+                let data = null;
+                try { data = JSON.parse(String(reader.result || '')); } catch (e) { data = null; }
+                if (!data || typeof data !== 'object') { this.toast('导入失败：文件不是有效的 JSON', 'warning'); return; }
+                this.applyTemplateImport(data);
+            };
+            reader.onerror = () => this.toast('导入失败：文件读取错误', 'warning');
+            reader.readAsText(file);
+        },
+        // 导入内容只取白名单字段（避免外部文件带入无关/危险字段）
+        normalizeElemForImport(el) {
+            if (!el || typeof el !== 'object') return null;
+            const out = {};
+            ['title', 'coach', 'date', 'aiPrompt', 'aiDataNote'].forEach((k) => {
+                if (el[k] != null) out[k] = String(el[k]);
+            });
+            const cp = this.normalizeCompPlan(el.compPlan);
+            if (cp.length) out.compPlan = cp;
+            return out;
+        },
+        // 合并导入：模板结构 + 报告元素（含赛事规划）+ 关联集训 + 水印模板
+        // 同名冲突：调用的 confirm 决定“覆盖”还是“自动重命名新增”；被历史报告引用的模板结构保持只读
+        applyTemplateImport(data) {
+            const tpls = (data && data.templates && typeof data.templates === 'object') ? data.templates : {};
+            const elems = (data && data.templateElements && typeof data.templateElements === 'object') ? data.templateElements : {};
+            const projs = (data && data.templateProjects && typeof data.templateProjects === 'object') ? data.templateProjects : {};
+            const wms = (data && data.watermarkTemplates && typeof data.watermarkTemplates === 'object') ? data.watermarkTemplates : {};
+            const names = Object.keys(tpls).filter((n) => !this.isReservedStructName(n) && Array.isArray(tpls[n]));
+            if (!names.length && !Object.keys(elems).length && !Object.keys(wms).length) {
+                this.toast('文件里没有可导入的模板数据', 'warning');
+                return;
+            }
+            const structAll = this.getQuantStructTemplates() || {};
+            const exist = names.filter((n) => !!structAll[n]);
+            let overwrite = true;
+            if (exist.length) {
+                overwrite = confirm(
+                    `已存在 ${exist.length} 个同名模板：\n${exist.join('、')}\n\n` +
+                    '确定＝覆盖同名模板的结构（被历史报告引用的模板结构会自动保留）\n' +
+                    '取消＝不覆盖，把导入的模板改名为「原名-导入」后新增。'
+                );
+            }
+            const meta = this.getTemplateMeta();
+            const used = {};
+            const stat = { added: 0, overwritten: 0, renamed: 0, frozen: 0, skipped: 0 };
+            names.forEach((n) => {
+                const struct = tpls[n];
+                let target = n;
+                if (structAll[target]) {
+                    if (overwrite) stat.overwritten += 1;
+                    else {
+                        let k = 1;
+                        do { target = `${n}-导入${k > 1 ? k : ''}`; k += 1; }
+                        while (structAll[target] || used[target] || this.isReservedStructName(target));
+                        stat.renamed += 1;
+                    }
+                } else {
+                    stat.added += 1;
+                }
+                used[target] = true;
+                if (structAll[target] && this.templateReferenced(target)) {
+                    stat.frozen += 1; // 结构被历史报告引用：保留原结构，仅更新报告元素/关联
+                } else {
+                    structAll[target] = JSON.parse(JSON.stringify(struct));
+                }
+                const el = this.normalizeElemForImport(elems[n]);
+                if (el) meta[target] = { ...(meta[target] || {}), el: { ...((meta[target] || {}).el || {}), ...el } };
+                const pj = Array.isArray(projs[n]) ? projs[n] : null;
+                if (pj) {
+                    const valid = pj.filter((id) => (Shared.data.trainings || []).some((t) => t.id === id));
+                    if (valid.length) meta[target] = { ...(meta[target] || {}), projects: valid };
+                    else if (meta[target]) delete meta[target].projects;
+                }
+            });
+            // 只导入报告元素、没有结构的模板（如从别处单独导出的元素）
+            Object.keys(elems).forEach((n) => {
+                if (names.includes(n) || used[n] || this.isReservedStructName(n)) return;
+                if (!structAll[n]) { stat.skipped += 1; return; }
+                const el = this.normalizeElemForImport(elems[n]);
+                if (el) meta[n] = { ...(meta[n] || {}), el: { ...((meta[n] || {}).el || {}), ...el } };
+            });
+            try { localStorage.setItem('evalQuantStructureTemplates', JSON.stringify(structAll)); } catch (e) { /* ignore */ }
+            this.saveTemplateMeta(meta);
+            // 水印模板（同名直接覆盖）
+            let wmN = 0;
+            if (Object.keys(wms).length) {
+                const all = this.getWatermarkTemplates() || {};
+                Object.keys(wms).forEach((n) => {
+                    if (!String(n).trim() || !wms[n] || typeof wms[n] !== 'object') return;
+                    all[n] = { ...this.watermarkDefaults(), ...wms[n] };
+                    wmN += 1;
+                });
+                if (wmN) {
+                    try { localStorage.setItem('evalWatermarkTemplates', JSON.stringify(all)); } catch (e) { /* ignore */ }
+                    this.refreshWatermarkTemplateSelect('');
+                }
+            }
+            this.renderTplMgmt();
+            if (document.getElementById('quantStructTpl')) this.refreshQuantStructSelect('');
+            else this.populateTemplateChoiceSelect();
+            const bits = [];
+            if (stat.added) bits.push(`新增 ${stat.added}`);
+            if (stat.overwritten) bits.push(`覆盖 ${stat.overwritten}`);
+            if (stat.renamed) bits.push(`重命名新增 ${stat.renamed}`);
+            if (stat.frozen) bits.push(`结构冻结保留 ${stat.frozen}`);
+            if (wmN) bits.push(`水印模板 ${wmN}`);
+            if (stat.skipped) bits.push(`跳过 ${stat.skipped}`);
+            this.toast(bits.length ? `导入完成：${bits.join(' · ')}` : '导入完成：没有发生变化', bits.length ? 'success' : 'warning');
+        },
+        setQuantExportAll(checked) {
+            const box = document.getElementById('quantTplExportList');
+            if (!box) return;
+            box.querySelectorAll('input[type="checkbox"]').forEach((cb) => { cb.checked = !!checked; });
+        },
+        // 报告级「量化结构模板」选择：创建/生成评估前选用（保留当前 / 内置默认 / 用户模板）
+        populateTemplateChoiceSelect() {
+            const sel = document.getElementById('evalTplChoice');
+            if (!sel) return;
+            const prev = sel.value;
+            const tpls = this.getQuantStructTemplates() || {};
+            const dl = this.getDefaultLoadName();
+            let html = '<option value="__keep__">（保留学员当前结构）</option>';
+            html += `<option value="__default__">${dl ? '' : '★'}内置默认</option>`;
+            Object.keys(tpls).forEach((n) => {
+                if (this.isReservedStructName(n)) return;
+                html += `<option value="${Shared.escapeHtml(n)}">${(n === dl ? '★' : '')}${Shared.escapeHtml(n)}</option>`;
+            });
+            sel.innerHTML = html;
+            if (prev && prev !== '__keep__' && (prev === '__default__' || tpls[prev])) sel.value = prev;
+            else sel.value = '__keep__';
+        },
+        // 生成评估前：选了模板且与学员当前结构不同 → 先应用到学员（无分数静默；有分数需确认）再回调
+        applyReportTplChoiceIfNeeded(thenDo) {
+            const sel = document.getElementById('evalTplChoice');
+            const v = sel ? sel.value : '__keep__';
+            if (!v || v === '__keep__') { if (thenDo) thenDo(); return; }
+            if (!this.selectedStudentId) { if (thenDo) thenDo(); return; }
+            const target = (v === '__default__') ? this.defaultQuantTemplate() : (this.getQuantStructTemplates() || {})[v];
+            if (!target || !target.length) { this.toast('所选模板不存在', 'warning'); if (thenDo) thenDo(); return; }
+            const label = v === '__default__' ? '内置默认' : v;
+            // 模板已关联「项目」→ 选择模板时自动带入评估范围
+            if (v !== '__default__') {
+                const tProj = this.templateProjects(v);
+                if (tProj.length) {
+                    this._applyScopeProjects(tProj);
+                    this.toast(`已带入模板「${label}」关联的 ${tProj.length} 个项目到评估范围`);
+                }
+            }
+            const cur = this.getQuantTemplate() || [];
+            if (this.quantTemplatesEqual(cur, target)) { if (thenDo) thenDo(); return; }
+            const hasScores = Object.keys(this.getQuantScores()).length > 0;
+            if (hasScores && !confirm(`用模板「${label}」替换当前学员的量化评估结构再生成？原有结构及已打分数将被替换。`)) return;
+            this._quantTemplate = JSON.parse(JSON.stringify(target));
+            this.saveQuantTemplate(this._quantTemplate);
+            this.saveQuantScores({});
+            if (this.quantSubMode === 'edit') this._quantEditBaseline = JSON.parse(JSON.stringify(this.getQuantTemplate()));
+            this.toast(`已套用模板「${label}」`);
+            if (thenDo) thenDo();
         },
         refreshQuantStructSelect(selectedName) {
             const sel = document.getElementById('quantStructTpl');
@@ -2264,6 +4688,7 @@
             const isUser = selectedName && this.getQuantStructTemplates()[selectedName];
             sel.value = selectedName === '__default__' ? '__default__' : (isUser ? selectedName : (dl || '__default__'));
             this.updateQuantTplControls();
+            this.populateTemplateChoiceSelect(); // 同步报告级「量化模板」下拉
         },
         // 同步「设为默认」「▶ 套用」「🗑 删除」按钮显隐与当前默认提示
         updateQuantTplControls() {
@@ -2295,6 +4720,8 @@
             this.saveQuantTemplate(this._quantTemplate);
             this.saveQuantScores({});
             this.initQuantTable();
+            // 套用模板本身即覆盖保存：若正处于「编辑」，同步基线避免误判为“有修改”
+            if (this.quantSubMode === 'edit') this._quantEditBaseline = JSON.parse(JSON.stringify(this.getQuantTemplate()));
             this.toast('已套用结构模板「' + name + '」');
         },
 
@@ -2307,6 +4734,8 @@
             this.saveQuantTemplate(this._quantTemplate);
             this.saveQuantScores({});
             this.initQuantTable();
+            // 恢复默认本身即覆盖保存：若正处于「编辑」，同步基线
+            if (this.quantSubMode === 'edit') this._quantEditBaseline = JSON.parse(JSON.stringify(this.getQuantTemplate()));
             this.toast('已恢复为「内置默认」结构');
         },
 
@@ -2341,7 +4770,7 @@
             } else {
                 t[di].dim = name;
             }
-            this.saveQuantTemplate(t);
+            this.persistQuantStructure(t);
             this.refreshQuantSummary(); // 同步汇总表 / 雷达图名称
             this.initQuantTable();
         },
@@ -2359,16 +4788,21 @@
         },
 
         initQuantTable() {
-            const container = document.getElementById('quantTableContainer');
+            const container = this._quantContainer || document.getElementById('quantTableContainer');
             if (!container) return;
-            this._quantTemplate = this.getQuantTemplate();
+            const tplEdit = !!this._tplEditCtx; // 处于「评估模板管理」内的模板编辑
+            // 报告「编辑」或模板编辑模式下保留草稿结构（_quantTemplate）；否则从已保存结构重建
+            if (!((this.quantSubMode === 'edit' || tplEdit) && this._quantTemplate && this._quantTemplate.length)) {
+                this._quantTemplate = this.getQuantTemplate();
+            }
             const template = this._quantTemplate || [];
             const saved = this.getQuantScores();
-            const editable = this.viewMode !== 'preview';
+            const editable = this.viewMode !== 'preview'; // 得分可填（填写）
+            const structEdit = editable && (this.quantSubMode === 'edit' || tplEdit); // 结构可改（报告编辑 / 模板编辑）
             const inputBase = 'padding:0.2rem 0.3rem;border:1px solid var(--gray-300);border-radius:4px;font-size:0.85rem;';
-            // 填写模式下列加宽以便编辑（预览/导出保持窄竖排）
-            const dimW = editable ? 56 : 27;
-            const subW = editable ? 56 : 28;
+            // 结构可编辑（编辑模式）列加宽以便操作；填写 / 预览保持窄竖排
+            const dimW = structEdit ? 56 : 27;
+            const subW = structEdit ? 56 : 28;
             const vtext = `writing-mode:vertical-rl;text-orientation:upright;font-size:0.85rem;line-height:1.05;color:#000;`;
             let bodyRows = '';
             template.forEach((dim, di) => {
@@ -2388,7 +4822,7 @@
                         const val = saved[key] !== undefined ? saved[key] : '';
                         // 维度列：预览/导出 = 只读竖排文字；填写 = 竖排名称 + 矩形色块 + 图标按钮列（✎改名 / ＋新增同级维度 / ×删除）
                         const dimCell = firstDim
-                            ? (editable
+                            ? (structEdit
                                 ? `<td class="quant-dim-name qdim" rowspan="${dimRowspan}" style="width:${dimW}px;min-width:${dimW}px;max-width:${dimW}px;padding:0.25rem 0.05rem;text-align:center;vertical-align:middle;background:${rowBg};">
                                     <div style="display:flex;flex-direction:column;align-items:center;gap:3px;">
                                         <span style="${vtext}max-height:12rem;overflow:hidden;white-space:pre;">${Shared.escapeHtml(dim.dim)}</span>
@@ -2406,7 +4840,7 @@
                         // 子维度列：预览/导出 = 只读竖排；填写 = 竖排名称 + 图标按钮列（✎改名 / ＋新增细则 / ×删除子维度）
                         const subRowspan = Math.max(1, (s.criteria || []).length);
                         const subCell = firstSub
-                            ? (editable
+                            ? (structEdit
                                 ? `<td class="qsub" rowspan="${subRowspan}" style="width:${subW}px;min-width:${subW}px;max-width:${subW}px;padding:0.2rem 0.05rem;text-align:center;vertical-align:middle;background:${rowBg};">
                                     <div style="display:flex;flex-direction:column;align-items:center;gap:2px;">
                                         <span style="${vtext}max-height:9rem;overflow:hidden;white-space:pre;">${Shared.escapeHtml(s.sub)}</span>
@@ -2420,20 +4854,22 @@
                                 : `<td class="qsub" rowspan="${subRowspan}" style="width:${subW}px;min-width:${subW}px;max-width:${subW}px;text-align:center;vertical-align:middle;background:${rowBg};"><span style="${vtext}">${Shared.escapeHtml(s.sub)}</span></td>`)
                             : '';
                         firstSub = false;
-                        const critCell = editable
+                        const critCell = structEdit
                             ? `<td><input type="text" class="quant-crit-text" data-dim="${di}" data-sub="${si}" data-ci="${cii}" value="${Shared.escapeHtml(c.name || '')}" placeholder="评价细则" style="width:100%;min-width:150px;${inputBase}"></td>`
                             : `<td style="color:var(--gray-700);">${c.name ? this.renderCriteriaText(c.name) : '—'}</td>`;
-                        const refCell = editable
+                        const refCell = structEdit
                             ? `<td style="text-align:center;"><input type="number" class="quant-ref" data-dim="${di}" data-sub="${si}" data-ci="${cii}" step="1" min="0" max="${this.MAX_SCORE}" value="${c.ref != null ? this.intRef(c.ref) : ''}" style="width:56px;text-align:center;${inputBase}appearance:textfield;-moz-appearance:textfield;"></td>`
                             : `<td style="text-align:center;color:var(--gray-600);">${c.ref != null ? this.intRef(c.ref) : '—'}</td>`;
-                        const delCell = editable
+                        const delCell = structEdit
                             ? `<td class="quant-op-col" style="text-align:center;width:40px;"><button type="button" class="quant-del" data-dim="${di}" data-sub="${si}" data-ci="${cii}" title="删除此细则" style="border:none;background:none;cursor:pointer;color:#ef4444;font-size:0.95rem;padding:0;">×</button></td>`
                             : '';
+                        // 模板编辑（评估模板管理）不显示“得分”列
+                        const scoreCell = tplEdit ? '' : `<td style="text-align:center;"><input type="number" class="quant-score" data-key="${key}" data-dim="${di}" min="0" max="${this.MAX_SCORE}" step="1" value="${val}" ${editable ? '' : 'readonly'} style="width:56px;text-align:center;${inputBase}appearance:textfield;-moz-appearance:textfield;"></td>`;
                         bodyRows += `<tr data-dim="${di}" data-sub="${si}" data-ci="${cii}" style="background:${rowBg};">
                             ${dimCell}
                             ${subCell}
                             ${critCell}
-                            <td style="text-align:center;"><input type="number" class="quant-score" data-key="${key}" data-dim="${di}" min="0" max="${this.MAX_SCORE}" step="1" value="${val}" ${editable ? '' : 'readonly'} style="width:56px;text-align:center;${inputBase}appearance:textfield;-moz-appearance:textfield;"></td>
+                            ${scoreCell}
                             ${refCell}
                             ${delCell}
                         </tr>`;
@@ -2446,18 +4882,20 @@
                         <thead><tr>
                             <th colspan="2" style="white-space:nowrap;text-align:center;font-size:0.72rem;padding:0.4rem 0.1rem;">评测维度</th>
                             <th>评价细则</th>
-                            <th style="width:76px;text-align:center;">得分</th>
+                            ${tplEdit ? '' : '<th style="width:76px;text-align:center;">得分</th>'}
                             <th style="width:76px;text-align:center;">参考评分</th>
-                            ${editable ? '<th class="quant-op-col" style="width:40px;"></th>' : ''}
+                            ${structEdit ? '<th class="quant-op-col" style="width:40px;"></th>' : ''}
                         </tr></thead>
                         <tbody>${bodyRows}</tbody>
                     </table>
                 </div>`;
-            container.querySelectorAll('.quant-score').forEach((inp) => {
-                inp.addEventListener('input', () => this.recalcQuant());
-                inp.addEventListener('change', () => this.recalcQuant());
-            });
-            if (editable) {
+            if (!tplEdit) {
+                container.querySelectorAll('.quant-score').forEach((inp) => {
+                    inp.addEventListener('input', () => this.recalcQuant());
+                    inp.addEventListener('change', () => this.recalcQuant());
+                });
+            }
+            if (structEdit) {
                 // —— 维度 / 子维度 名称：✎ 按钮弹窗改名（名称只读展示）——
                 container.querySelectorAll('.quant-rename').forEach((btn) => {
                     btn.addEventListener('click', () => this.renameQuantItem(
@@ -2471,7 +4909,7 @@
                     inp.addEventListener('change', () => {
                         const t = this._quantTemplate;
                         const di = Number(inp.dataset.dim);
-                        if (t && t[di]) { t[di].color = inp.value; this.saveQuantTemplate(t); }
+                        if (t && t[di]) { t[di].color = inp.value; this.persistQuantStructure(t); }
                         this.initQuantTable();
                         this.refreshQuantSummary();
                     });
@@ -2481,7 +4919,7 @@
                         const t = this._quantTemplate;
                         if (t && t[Number(inp.dataset.dim)] && t[Number(inp.dataset.dim)].subs[Number(inp.dataset.sub)]) {
                             t[Number(inp.dataset.dim)].subs[Number(inp.dataset.sub)].criteria[Number(inp.dataset.ci)].name = inp.value.trim();
-                            this.saveQuantTemplate(t);
+                            this.persistQuantStructure(t);
                         }
                     });
                 });
@@ -2495,7 +4933,7 @@
                             if (raw === '') { r = null; } // 留空 = 未填参考分
                             else { r = this.intRef(raw); if (String(raw) !== String(r)) inp.value = r; }
                             t[di].subs[si].criteria[cii].ref = r;
-                            this.saveQuantTemplate(t);
+                            this.persistQuantStructure(t);
                             this.recalcQuant();
                         }
                     });
@@ -2507,7 +4945,7 @@
                         if (t && t[di] && t[di].subs[si]) {
                             if (t[di].subs[si].criteria.length <= 1) { this.toast('每个子维度至少保留一条评价细则', 'warning'); return; }
                             t[di].subs[si].criteria.splice(cii, 1);
-                            this.saveQuantTemplate(t);
+                            this.persistQuantStructure(t);
                             this.initQuantTable();
                             this.recalcQuant();
                         }
@@ -2521,7 +4959,7 @@
                             const crits = t[di].subs[si].criteria;
                             const defRef = crits.length ? crits.reduce((a, c) => a + (c.ref != null ? c.ref : 0), 0) / crits.length : 3;
                             crits.push({ name: '', ref: this.intRef(defRef) });
-                            this.saveQuantTemplate(t);
+                            this.persistQuantStructure(t);
                             this.initQuantTable();
                             this.recalcQuant();
                         }
@@ -2538,7 +4976,7 @@
                     btn.addEventListener('click', () => this.removeDim(Number(btn.dataset.dim)));
                 });
             }
-            this.recalcQuant();
+            if (!tplEdit) this.recalcQuant();
         },
 
         // ============ 量化模板结构编辑：维度 / 子维度 增删 ============
@@ -2550,7 +4988,7 @@
             const color = this.DIM_PALETTE[(n - 1) % this.DIM_PALETTE.length];
             t.push({ dim: '维度' + this.numToCn(n), icon: '', color, subs: [{ sub: '子维度一', criteria: [{ name: '', ref: 4 }] }] });
             this._quantTemplate = t;
-            this.saveQuantTemplate(t);
+            this.persistQuantStructure(t);
             this.initQuantTable();
         },
         // 在指定维度之后新增一个同级维度（插到该维度后面）
@@ -2563,7 +5001,7 @@
             const nd = { dim: '维度' + this.numToCn(n), icon: '', color, subs: [{ sub: '子维度一', criteria: [{ name: '', ref: 4 }] }] };
             t.splice(at + 1, 0, nd);
             this._quantTemplate = t;
-            this.saveQuantTemplate(t);
+            this.persistQuantStructure(t);
             this.initQuantTable();
         },
         // 在指定维度下追加子维度（自动命名「子维度N」+ 一条空白细则）
@@ -2575,7 +5013,7 @@
             if (dim.subs.length >= 12) { this.toast('子维度数量已达上限（12）', 'warning'); return; }
             dim.subs.push({ sub: '子维度' + this.numToCn(dim.subs.length + 1), criteria: [{ name: '', ref: 4 }] });
             this._quantTemplate = t;
-            this.saveQuantTemplate(t);
+            this.persistQuantStructure(t);
             this.initQuantTable();
         },
         // 删除整个维度（连同子维度与细则）
@@ -2586,7 +5024,7 @@
             if (!confirm(`删除整个维度「${dim.dim}」及其所有子维度、评价细则？此操作不可撤销。`)) return;
             t.splice(di, 1);
             this._quantTemplate = t;
-            this.saveQuantTemplate(t);
+            this.persistQuantStructure(t);
             this.initQuantTable();
         },
         // 删除某个子维度（至少保留一个）
@@ -2598,7 +5036,7 @@
             if (!confirm(`删除子维度「${dim.subs[si].sub}」及其评价细则？`)) return;
             dim.subs.splice(si, 1);
             this._quantTemplate = t;
-            this.saveQuantTemplate(t);
+            this.persistQuantStructure(t);
             this.initQuantTable();
         },
         // —— 新增子维度弹窗（需选择父维度）——
@@ -2626,6 +5064,7 @@
         },
 
         recalcQuant() {
+            if (this._tplEditCtx) return; // 模板编辑（评估模板管理）不涉及打分
             const container = document.getElementById('quantTableContainer');
             if (!container) return;
             const map = {};
