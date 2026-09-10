@@ -69,7 +69,7 @@
     <div class="header-inner">
         ${hasSidebar ? '<button class="sidebar-toggle" id="sidebarToggle" aria-label="切换菜单">☰</button>' : ''}
         <a href="index.html" class="back-home" title="返回首页">← 主页</a>
-        <span class="logo">🏆 MakeX Inspire</span>
+        <span class="logo">🏆 机器人竞技青训辅助工具</span>
         <div class="header-tabs">
             ${categoryTabs.map(t =>
                 // 首页（index.html）高亮「🏠 首页」；about / 开发者工具页无对应分类 tab，抑制高亮
@@ -216,7 +216,7 @@
         const footer = document.createElement('footer');
         footer.className = 'site-footer';
         footer.innerHTML = `
-            <span class="site-footer-item">MakeX Inspire 成绩统计系统</span>
+            <span class="site-footer-item">机器人竞技青训辅助工具</span>
             <span class="site-footer-sep">·</span>
             <a href="devtools.html" class="site-footer-item site-footer-link${activeMenu === 'devtools' ? ' active' : ''}" title="存储引擎 / 数据库管理 / 数据备份">🛠 开发者工具</a>
         `;
