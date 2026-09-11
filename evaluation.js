@@ -548,7 +548,7 @@
             const board = document.getElementById('planBoard');
             const cardsEl = document.getElementById('planCards');
             if (!board || !cardsEl) return;
-            const pending = this.getPlans().filter((p) => p.status !== 'done');
+            const plans = this.getPlans();
             const guide = document.getElementById('evalPageEmpty');
             const view = this.getPlanView();
             // 呈现方式切换按钮状态 + 班级下拉显隐（仅「按学员」需要）
@@ -556,48 +556,68 @@
             if (toggle) toggle.querySelectorAll('.view-btn').forEach((b) => b.classList.toggle('active', b.dataset.planview === view));
             const clsSel = document.getElementById('planStuClass');
             if (clsSel) clsSel.style.display = view === 'student' ? '' : 'none';
-            // 看板头部（含 模板管理 / ＋新增）常显，空计划时只隐藏卡片区
-            if (!pending.length) {
+            const showEmptyGuide = () => {
                 cardsEl.style.display = 'none';
                 cardsEl.innerHTML = '';
                 if (clsSel) { clsSel.innerHTML = ''; clsSel.style.display = 'none'; }
                 if (guide) guide.style.display = 'block';
+            };
+            // 按学员：有无计划都列出「全部学员」（含无计划 / 无报告的学员）
+            if (view === 'student') {
+                if (!(Shared.data.students || []).length) { showEmptyGuide(); return; }
+                cardsEl.style.display = 'flex';
+                if (guide) guide.style.display = 'none';
+                this._renderPlanStudentView(plans, cardsEl);
                 return;
             }
+            // 按计划：没有任何计划时给出引导
+            if (!plans.length) { showEmptyGuide(); return; }
             cardsEl.style.display = 'flex';
             if (guide) guide.style.display = 'none';
-            if (view === 'student') { this._renderPlanStudentView(pending, cardsEl); return; }
             const esc = Shared.escapeHtml;
             const escAttr = (s) => esc(String(s == null ? '' : s)).replace(/"/g, '&quot;');
             const milestones = (p) => {
                 const sts = (p.studentIds || []).map((sid) => { const t = (p.tasks && p.tasks[sid]) || {}; return t; });
                 return { total: sts.length, fill: sts.filter((t) => t.fill).length, done: sts.filter((t) => t.fill && t.export).length };
             };
-            let html = '';
-            pending.forEach((p) => {
+            const cardHtml = (p) => {
                 const exp = this._expandedPlanId === p.id;
                 const m = milestones(p);
+                const stage = this.planStage(p);
                 // 卡面只留最精简信息（图标 + 名称/数字），完整信息放 title
                 const tplLabel = p.templateLabel || '内置默认';
                 const wmLabel = p.wmTemplateKey ? (p.wmTemplateLabel || p.wmTemplateKey) : '';
                 const projCount = (p.projects && p.projects.length) ? p.projects.length : 0;
+                const confirmedAt = p.confirmedAt ? this._fmtRecTime(new Date(p.confirmedAt).getTime()) : '';
                 const metaTip = [
                     `评估模板：${tplLabel}`,
                     projCount ? `关联集训：${projCount} 个` : '',
                     wmLabel ? `PDF 水印：${wmLabel}` : '',
+                    confirmedAt ? `确认完成：${confirmedAt}` : '',
                 ].filter(Boolean).join('　｜　');
-                html += `
-                <div class="plan-item${exp ? ' expanded' : ''}" data-id="${esc(p.id)}">
+                // 进度：进行中/待确认显示里程碑计数；已完成显示确认时间
+                const progHtml = stage === 'done'
+                    ? `<span class="plan-meta prog" title="${escAttr(metaTip)}">✅ 已完成</span>`
+                    : `<span class="plan-meta prog" title="填写完成 / 学员总数 · 导出完成 / 学员总数">✍️ ${m.fill}/${m.total} · 📤 ${m.done}/${m.total}</span>`;
+                // 阶段操作：完成待确认 → 手动确认完成；已完成 → 可撤销确认
+                const stageBtn = stage === 'review'
+                    ? `<button type="button" class="btn btn-sm btn-primary" data-act="confirm" data-id="${esc(p.id)}" title="所有学员的填写与导出都已完成；确认后该计划归入「已完成」">✅ 确认完成</button>`
+                    : (stage === 'done'
+                        ? `<button type="button" class="btn btn-sm btn-outline" data-act="unconfirm" data-id="${esc(p.id)}" title="撤销「完成」确认，回到「完成待确认」">↩ 撤销</button>`
+                        : '');
+                let html = `
+                <div class="plan-item${exp ? ' expanded' : ''}" data-id="${esc(p.id)}" data-stage="${stage}">
                     <div class="plan-card" draggable="true" data-id="${esc(p.id)}">
                         <span class="plan-drag" title="拖动排序">⠿</span>
                         <div class="plan-card-main" data-id="${esc(p.id)}" title="点击展开 / 收起学员">
                             <span class="plan-title">${exp ? '▾' : '▸'} ${esc(p.title || '（未命名）')}</span>
                             <span class="plan-meta-wrap">
                                 <span class="plan-meta tpl" title="${escAttr(metaTip)}">🎯 ${esc(tplLabel)}${wmLabel ? ` · 💧 ${esc(wmLabel)}` : ''}</span>
-                                <span class="plan-meta prog" title="填写完成 / 学员总数 · 导出完成 / 学员总数">✍️ ${m.fill}/${m.total} · 📤 ${m.done}/${m.total}</span>
+                                ${progHtml}
                             </span>
                         </div>
                         <span class="plan-actions">
+                            ${stageBtn}
                             <button type="button" class="btn btn-sm btn-outline" data-act="edit" data-id="${esc(p.id)}" title="编辑计划">✎</button>
                             <button type="button" class="btn btn-sm btn-outline" data-act="del" data-id="${esc(p.id)}" title="删除计划">🗑</button>
                         </span>
@@ -643,6 +663,22 @@
                     html += '</div>';
                 }
                 html += '</div>';
+                return html;
+            };
+            // 三档分类：进行中 / 完成待确认（流程走完待人工确认）/ 已完成（人工确认过）
+            const groups = [
+                { key: 'active', label: '🚧 进行中' },
+                { key: 'review', label: '⏳ 完成待确认' },
+                { key: 'done', label: '✅ 已完成' },
+            ];
+            let html = '';
+            groups.forEach((g) => {
+                const list = plans.filter((p) => this.planStage(p) === g.key);
+                if (!list.length) return;
+                html += '<div class="plan-rec-sec">';
+                html += `<div class="plan-rec-head">${g.label} <span class="gcount">（${list.length}）</span></div>`;
+                list.forEach((p) => { html += cardHtml(p); });
+                html += '</div>';
             });
             cardsEl.innerHTML = html;
         },
@@ -658,33 +694,41 @@
             this.renderPlanBoard();
         },
         // 按学员汇总（每名学员一条）：学员信息 + 计划内评估任务 + 历史报告存档
-        _planStudentRecords(pending) {
+        // 注意：遍历「全部学员」，没有任何计划 / 报告的学员也要出现在列表里
+        _planStudentRecords(plans) {
             const archives = this.getIssuedReports();
+            const allStudents = Shared.data.students || [];
             const map = new Map();
-            (pending || []).forEach((p) => {
+            const ensure = (sid) => {
+                if (map.has(sid)) return map.get(sid);
+                const st = allStudents.find((x) => x.id === sid) || null;
+                const cid = Shared.getCurrentClassId ? Shared.getCurrentClassId(sid) : '';
+                const rec = {
+                    sid,
+                    name: st ? st.name : sid,
+                    clsId: cid || '',
+                    className: Shared.getCurrentClassName ? (Shared.getCurrentClassName(sid) || '') : '',
+                    tasks: [],
+                    archives: [],
+                };
+                map.set(sid, rec);
+                return rec;
+            };
+            allStudents.forEach((st) => ensure(st.id));
+            (plans || []).forEach((p) => {
                 (p.studentIds || []).forEach((sid) => {
-                    if (!map.has(sid)) {
-                        const st = (Shared.data.students || []).find((x) => x.id === sid);
-                        const cid = Shared.getCurrentClassId ? Shared.getCurrentClassId(sid) : '';
-                        map.set(sid, {
-                            sid,
-                            name: st ? st.name : sid,
-                            clsId: cid || '',
-                            className: Shared.getCurrentClassName ? (Shared.getCurrentClassName(sid) || '') : '',
-                            tasks: [],
-                            archives: [],
-                        });
-                    }
+                    const rec = ensure(sid);
                     const t = (p.tasks && p.tasks[sid]) || {};
                     const stamp = [t.fillAt, t.exportAt, p.createdAt]
                         .map((x) => (x ? new Date(x).getTime() : 0))
                         .filter((n) => n > 0);
-                    map.get(sid).tasks.push({
+                    rec.tasks.push({
                         pid: p.id,
                         planTitle: p.title || '（未命名）',
                         templateLabel: p.templateLabel || '内置默认',
                         fill: !!t.fill,
                         export: !!t.export,
+                        confirmed: !!p.confirmedAt,
                         at: stamp.length ? Math.max(...stamp) : 0,
                     });
                 });
@@ -700,8 +744,9 @@
                     ...s.archives.map((r) => (r.savedAt ? new Date(r.savedAt).getTime() : 0)),
                 ].filter((n) => n > 0);
                 s.lastAt = times.length ? Math.max(...times) : 0;
-                // 三档分类：1 未填写；2 已完成填写但仍可修改（无存档 / 存在未定稿存档）；3 已完成且已定稿（不可修改）
+                // 四档分类：1 有任务待填写；2 已完成填写但仍可修改；3 已完成且已定稿；4 暂无任何评估（计划 / 报告都没有）
                 if (s.openCount > 0) s.bucket = 1;
+                else if (!s.tasks.length && !s.archives.length) s.bucket = 4;
                 else if (s.archives.length && s.finalCount === s.archives.length) s.bucket = 3;
                 else s.bucket = 2;
             });
@@ -729,10 +774,9 @@
             sel.value = [...sel.options].some((o) => o.value === want) ? want : '';
             return sel.value;
         },
-        // 按学员呈现：三档分组（未填写 / 已完成可修改 / 已完成不可修改），档内按时间倒序
-        _renderPlanStudentView(pending, cardsEl) {
-            const esc = Shared.escapeHtml;
-            const all = this._planStudentRecords(pending);
+        // 按学员呈现：四档分组（待填写 / 已完成可修改 / 已完成不可修改 / 暂无评估），档内按姓名排序
+        _renderPlanStudentView(plans, cardsEl) {
+            const all = this._planStudentRecords(plans);
             const filterKey = this._renderPlanClassFilter(all, this._planStuFilter);
             const known = new Set((Shared.data.classes || []).map((c) => c.id));
             const shown = all.filter((s) => {
@@ -741,13 +785,14 @@
                 return filterKey === '__none__' ? !key : key === filterKey;
             });
             if (!shown.length) {
-                cardsEl.innerHTML = '<div class="plan-stu-view"><div class="plan-stu-view-empty">该班级下暂无待评估的学员</div></div>';
+                cardsEl.innerHTML = '<div class="plan-stu-view"><div class="plan-stu-view-empty">该班级下暂无学员</div></div>';
                 return;
             }
             const buckets = [
-                { key: 1, label: '👤 未填写', icon: '👤' },
-                { key: 2, label: '🖊 已完成填写 · 可修改', icon: '🖊' },
-                { key: 3, label: '🔒 已完成 · 不可修改', icon: '🔒' },
+                { key: 1, label: '👤 有任务待填写' },
+                { key: 2, label: '🖊 已完成填写 · 可修改' },
+                { key: 3, label: '🔒 已完成 · 不可修改' },
+                { key: 4, label: '📭 暂无评估（无计划 / 无报告）' },
             ];
             let html = '<div class="plan-stu-view">';
             buckets.forEach((b) => {
@@ -764,10 +809,11 @@
         // 学员信息卡（按学员呈现用）：整卡可点，打开该学员的全部评估记录
         _planStuCardHtml(s) {
             const esc = Shared.escapeHtml;
-            const icon = s.bucket === 1 ? '👤' : (s.bucket === 2 ? '🖊' : '🔒');
+            const icon = s.bucket === 1 ? '👤' : (s.bucket === 2 ? '🖊' : (s.bucket === 3 ? '🔒' : '📭'));
             const stateTxt = s.bucket === 1
                 ? `待填写 ${s.openCount} 项`
-                : (s.bucket === 2 ? '已完成填写 · 仍可修改' : '已完成 · 已定稿不可修改');
+                : (s.bucket === 2 ? '已完成填写 · 仍可修改'
+                    : (s.bucket === 3 ? '已完成 · 已定稿不可修改' : '暂无评估任务'));
             const cls = s.className ? `🏫 ${esc(s.className)}` : '🏫 未分班';
             return `
             <button type="button" class="plan-stu-card stu-card" data-rec-sid="${esc(s.sid)}" title="点击查看该学员的全部评估记录">
@@ -809,8 +855,8 @@
             const box = document.getElementById('stuRecordsList');
             const title = document.getElementById('stuRecordsTitle');
             if (!sid || !box) return;
-            const pending = this.getPlans().filter((p) => p.status !== 'done');
-            const s = this._planStudentRecords(pending).find((x) => x.sid === sid);
+            const plans = this.getPlans();
+            const s = this._planStudentRecords(plans).find((x) => x.sid === sid);
             if (!s) { box.innerHTML = '<div class="rec-empty">未找到该学员的评估记录</div>'; return; }
             const esc = Shared.escapeHtml;
             if (title) title.textContent = `👤 ${s.name}${s.className ? ' · ' + s.className : ''} · 现有评估 ${s.total} 条`;
@@ -822,7 +868,7 @@
                 html += `<div class="rec-row">
                     <span class="rec-main">
                         <span class="rec-title">${esc(t.planTitle)}</span>
-                        <span class="rec-sub">🎯 模板：${esc(t.templateLabel)}${t.at ? ` · ${this._fmtRecTime(t.at)}` : ''}</span>
+                        <span class="rec-sub">🎯 模板：${esc(t.templateLabel)}${t.at ? ` · ${this._fmtRecTime(t.at)}` : ''}${t.confirmed ? ' · ✅ 计划已完成' : ''}</span>
                     </span>
                     <span class="rec-state">${state}</span>
                     <button type="button" class="btn btn-sm btn-outline" data-rec-open="1" data-mode="${t.fill ? 'preview' : 'edit'}" data-pid="${esc(t.pid)}" data-sid="${esc(s.sid)}" title="${t.fill ? '已填写完成：直接预览 / 导出（只读）' : '打开该学员的评估报告（填写 / 修改）'}">${t.fill ? '👁 预览导出' : '✍️ 进入填写'}</button>
@@ -1086,6 +1132,29 @@
                 return;
             }
             if (act === 'edit') { this.openPlanModal(id); return; }
+            // 完成待确认 → 操作人员手动确认（最终完成）
+            if (act === 'confirm') {
+                const list = this.getPlans();
+                const p = list.find((x) => x.id === id);
+                if (!p) return;
+                if (!this.planAchieved(p)) { this.toast('还有学员未完成填写 / 导出，暂不能确认完成', 'warning'); return; }
+                p.confirmedAt = new Date().toISOString();
+                this.savePlans(list);
+                this.renderPlanBoard();
+                this.toast(`已确认完成「${p.title || ''}」`);
+                return;
+            }
+            // 撤销确认 → 回到「完成待确认」
+            if (act === 'unconfirm') {
+                const list = this.getPlans();
+                const p = list.find((x) => x.id === id);
+                if (!p) return;
+                if (!confirm(`撤销「${p.title || ''}」的完成确认？（将回到「完成待确认」）`)) return;
+                delete p.confirmedAt;
+                this.savePlans(list);
+                this.renderPlanBoard();
+                this.toast('已撤销完成确认，计划回到「完成待确认」');
+            }
         },
         // 读取某学员已保存分数
         getStudentScores(sid) {
@@ -1165,6 +1234,20 @@
             if (!p.tasks[sid]) p.tasks[sid] = { fill: false, export: false };
             return p.tasks[sid];
         },
+        // 计划流程是否已走完：所有学员都完成「填写 + 导出」
+        planAchieved(p) {
+            const sids = (p && p.studentIds) || [];
+            if (!sids.length) return false;
+            return sids.every((sid) => {
+                const t = (p.tasks && p.tasks[sid]) || {};
+                return !!t.fill && !!t.export;
+            });
+        },
+        // 计划阶段：active 进行中 / review 完成待确认 / done 已完成（由操作人员最终确认）
+        planStage(p) {
+            if (p && p.confirmedAt) return 'done';
+            return this.planAchieved(p) ? 'review' : 'active';
+        },
         // 自动记进度：mil=fill（进入填写并改动）/ export（打印或存档报告）
         _markPlanTask(pid, sid, mil) {
             if (!pid || !sid) return false;
@@ -1186,11 +1269,10 @@
                 return false;
             }
             const allDone = (p.studentIds || []).length > 0 && (p.studentIds || []).every((s) => { const tt = this._planTask(p, s); return tt.fill && tt.export; });
+            this.savePlans(list);
             if (allDone) {
-                this.savePlans(list.filter((x) => x.id !== p.id));
-                this.toast(`计划「${p.title || ''}」全部学员任务完成 🎉`);
-            } else {
-                this.savePlans(list);
+                // 流程走完不再自动移除计划：进入「完成待确认」，等操作人员手动确认完成
+                this.toast(`计划「${p.title || ''}」全部学员流程已走完，待确认完成`);
             }
             return true;
         },
