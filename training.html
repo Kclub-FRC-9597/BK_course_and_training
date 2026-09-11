@@ -2506,6 +2506,10 @@
                         sortedMocks.forEach((m) => {
                             const typeLabel = Shared.getMockTypeLabel(m);
                             const typeBg = Shared.getMockTypeBg(m);
+                            // 正赛比模拟赛多一行「真实排名」（汇总行：最佳 / 内部排名 / 真实排名），
+                            // 行合并必须算上这一行，否则该行会整体左移、数值落到别的学员列下
+                            const isOfficialMock = (m.competitionType || 'mock') === 'official';
+                            const summaryRowCount = isOfficialMock ? 3 : 2;
 
                             // Tasks this mock covers
                             const mockTasks = (m.tasks && m.tasks.length > 0) ? m.tasks : [{ taskId: null, rounds: 1 }];
@@ -2521,7 +2525,7 @@
                                     html += '<tr>';
                                     if (firstRow && r === 1) {
                                         const totalRounds = mockTasks.reduce((sum, ti) => sum + (ti.rounds || 1), 0);
-                                        const rowspan = totalRounds + 2; // +2 for 最佳 and 排名 rows
+                                        const rowspan = totalRounds + summaryRowCount;
                                         html += `<td rowspan="${rowspan}" style="vertical-align:middle;">
                                             <div style="display:flex;align-items:center;gap:0.3rem;">
                                                 <strong>${this.escapeHtml(m.name)}</strong>
@@ -2572,7 +2576,7 @@
                             const totalRounds = mockTasks.reduce((sum, ti) => sum + (ti.rounds || 1), 0);
                             html += '<tr style="background:var(--primary-bg);font-weight:600;">';
                             if (hasTasks) {
-                                html += `<td rowspan="2" style="vertical-align:middle;text-align:center;font-size:0.82rem;color:var(--primary);font-weight:700;">统计</td>`;
+                                html += `<td rowspan="${summaryRowCount}" style="vertical-align:middle;text-align:center;font-size:0.82rem;color:var(--primary);font-weight:700;">统计</td>`;
                             }
                             html += `<td style="text-align:center;font-size:0.8rem;color:var(--primary);font-weight:700;">最佳</td>`;
                             students.forEach((s) => {
@@ -2622,7 +2626,7 @@
                             html += '</tr>';
 
                             // === Summary row: 排名 ===
-                            const isOfficial = (m.competitionType || 'mock') === 'official';
+                            const isOfficial = isOfficialMock;
                             html += '<tr style="background:var(--primary-bg);border-bottom:3px solid var(--gray-300);">';
                             html += `<td style="text-align:center;font-size:0.82rem;font-weight:600;color:var(--accent);">${isOfficial ? '内部排名' : '排名'}</td>`;
                             students.forEach((s) => {
