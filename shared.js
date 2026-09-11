@@ -261,9 +261,16 @@ const Shared = {
     },
 
     // ============ Entry Helpers (shared by stats & training) ============
+    // entry 两种形态：单轮 {score,time}；多轮 {round1:{...}, round2:{...}, round3:{...} …}
+    // 返回按轮次序号排序的全部轮次（不再只取前两轮，否则第 3 轮及以后的成绩会看不见）
     getRounds(entry) {
         if (!entry) return [];
-        if (entry.round1) return [entry.round1, entry.round2].filter(Boolean);
+        const keys = Object.keys(entry).filter((k) => /^round\d+$/.test(k));
+        if (keys.length) {
+            return keys
+                .sort((a, b) => Number(a.slice(5)) - Number(b.slice(5)))
+                .map((k) => entry[k]);
+        }
         return [entry];
     },
 

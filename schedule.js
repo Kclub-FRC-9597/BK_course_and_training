@@ -64,7 +64,8 @@ const Schedule = {
                 const entry = scores[sid] && scores[sid][ti.taskId || '__default__'];
                 if (!entry) { allDone = false; return; }
                 const rounds = getRoundsFn(entry);
-                for (let r = 0; r < (ti.rounds || 1); r++) {
+                const needRounds = Math.max(ti.rounds || 1, rounds.length);
+                for (let r = 0; r < needRounds; r++) {
                     const rd = rounds[r];
                     if (rd && rd.withdrawn) { hasWithdrawn = true; allDone = false; }
                     else if (!rd || rd.score === undefined) { allDone = false; }
@@ -164,7 +165,15 @@ const Schedule = {
             mock.tasks.forEach(ti => {
                 const def = (D.tasks || []).find(td => td.id === ti.taskId);
                 const tname = def ? def.name : '未知任务';
-                const n = ti.rounds || 1;
+                // 轮次数取「设定值」与「数据里实际已有轮次」的较大值（兼容历史数据轮次多于此设定）
+                let maxDataRounds = 0;
+                Object.keys((mock && mock.scores) || {}).forEach(sid => {
+                    const entry = mock.scores[sid] && mock.scores[sid][ti.taskId];
+                    if (!entry) return;
+                    const n = (window.Shared && window.Shared.getRounds) ? window.Shared.getRounds(entry).length : 0;
+                    if (n > maxDataRounds) maxDataRounds = n;
+                });
+                const n = Math.max(ti.rounds || 1, maxDataRounds);
                 for (let r = 1; r <= n; r++) {
                     const rid = ti.taskId + '_R' + r;
                     roundIdx++;

@@ -1413,7 +1413,15 @@
                 const taskDef = ti.taskId ? this.data.tasks.find((d) => d.id === ti.taskId) : null;
                 const taskName = taskDef ? taskDef.name : '默认任务';
                 const taskId = ti.taskId || '__default__';
-                const rounds = ti.rounds || 1;
+                // 该任务在数据里实际已有的最大轮次（兼容轮次多于设定值的历史数据，避免后几轮成绩看不见/无法补录）
+                let dataRounds = 0;
+                Object.keys(mock.scores || {}).forEach((sid) => {
+                    const entry = mock.scores[sid] && mock.scores[sid][ti.taskId];
+                    if (!entry) return;
+                    const n = this.getRounds(entry).length;
+                    if (n > dataRounds) dataRounds = n;
+                });
+                const rounds = Math.max(ti.rounds || 1, dataRounds);
                 for (let r = 1; r <= rounds; r++) {
                     columns.push({ taskId, taskName, round: r, totalRounds: rounds });
                 }
@@ -1495,12 +1503,15 @@
                 <thead>${taskGroupRow}${th}</thead>
                 <tbody>${rows}</tbody>
             </table></div>`;
-            html += `<div id="scoreEntrySchedule">` + this._renderScheduleContent(mock, training) + `</div>`;
+            // 赛程面板只在模拟赛展示（正赛按轮次直接录分，不需要排赛程）
+            if (!isOfficial) {
+                html += `<div id="scoreEntrySchedule">` + this._renderScheduleContent(mock, training) + `</div>`;
+            }
             html += `</div>`; // close the flex wrapper
             container.innerHTML = html;
 
-            // Bind schedule panel events
-            this._bindScheduleEvents();
+            // Bind schedule panel events（正赛无赛程面板，跳过绑定）
+            if (!isOfficial) this._bindScheduleEvents();
 
             // Bind concurrent lanes change
             document.getElementById('concurrentLanes').addEventListener('change', (e) => {
