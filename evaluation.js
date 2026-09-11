@@ -3504,7 +3504,7 @@
         },
 
         // 教练评语 AI 数据说明（默认元素，描述数据结构，随数据包一起发送/复制）
-        DEFAULT_AI_DATA_NOTE: '以下为学员评估信息，各区块含义：\n- 学员信息：学员姓名、班级、教练、报告填写日期\n- 参赛记录：赛事、任务、得分（分）、用时（秒）、轮次、来源（正赛/模拟赛/自主训练）\n- 任务表现统计：各任务最佳分、练习次数、平均分、满分率、稳定性评级、综合评级\n- 各任务趋势指标：按任务给出 满分率、用时样本、成绩预估（用时）、集中度（用时）、阶段变化（均为相对该学员自身，计算口径见该节内说明）\n- 量化评估（综合）：各维度/子维度 评分、参考值、同龄指数（= 评分÷参考值，超过100%表示高于同龄参考水平）\n- 现有教练评语：教练已填写的评语草稿（可为空）',
+        DEFAULT_AI_DATA_NOTE: '以下为学员评估信息，各区块含义：\n- 学员信息：学员姓名、班级、教练、报告填写日期\n- 参赛记录：赛事、任务、得分（分）、用时（秒）、轮次、来源（正赛/模拟赛/自主训练）\n- 任务表现统计：各任务最佳分、练习次数、平均分、满分率、稳定性评级、综合评级\n- 各任务趋势指标：按任务给出 满分率、用时样本、成绩预估（用时）、集中度（用时）、用时趋势（均为相对该学员自身，计算口径见该节内说明）\n- 量化评估（综合）：各维度/子维度 评分、参考值、同龄指数（= 评分÷参考值，超过100%表示高于同龄参考水平）\n- 现有教练评语：教练已填写的评语草稿（可为空）',
         getAIDataNote() {
             const n = this.getReportElements().aiDataNote;
             return (n && String(n).trim()) ? n : this.DEFAULT_AI_DATA_NOTE;
@@ -3594,9 +3594,11 @@
                         bits.push('用时样本 ' + t.n + ' 次（' + (t.scope === 'full' ? '满分场次' : '含非满分场次') + '）');
                         bits.push('成绩预估（用时）' + t.M.toFixed(1) + 's ± ' + (t.off != null ? t.off.toFixed(1) + 's' : '—'));
                         bits.push('集中度（用时）' + (t.disp != null ? Math.round(t.disp * 100) + '%（' + (t.disp < 0.10 ? '集中' : (t.disp < 0.20 ? '一般' : '分散')) + '）' : '—'));
-                        if (t.stageDelta) {
-                            const d = t.stageDelta;
-                            bits.push('阶段变化 ' + (d.pct > 0 ? '变慢 ' : '变快 ') + Math.abs(d.pct * 100).toFixed(0) + '%（本期「' + d.curName + '」' + d.curM.toFixed(1) + 's vs 上期「' + d.prevName + '」' + d.prevM.toFixed(1) + 's）');
+                        if (t.trend && t.trend.dir !== 'na') {
+                            const g = t.trend;
+                            const label = g.dir === 'flat' ? '基本持平' : (g.dir === 'faster' ? '变快 ' : '变慢 ') + Math.abs(g.pct * 100).toFixed(0) + '%';
+                            const spanTxt = g.dir === 'flat' ? '全程只变化 ' + Math.abs(g.total).toFixed(1) + 's' : '全程约' + (g.dir === 'faster' ? '快' : '慢') + ' ' + Math.abs(g.total).toFixed(1) + 's';
+                            bits.push('用时趋势 ' + label + '（稳健斜率 ' + Math.abs(g.slope).toFixed(2) + 's/场，' + g.n + ' 次样本，' + spanTxt + '）');
                         }
                     }
                     lines.push('- ' + g.name + '：' + (bits.length ? bits.join('；') : '数据不足'));
@@ -3606,7 +3608,7 @@
                 lines.push('· 用时样本 = 参与用时计算的样本数；优先只用「满分场次」的用时（满分场次 ≥2 条时），不足 2 条则退化为全部有用时的记录');
                 lines.push('· 成绩预估（用时）= 中位数 M ± 1.4826×MAD（中位绝对偏差）；M 是该学员的典型用时，± 是波动范围（约 68% 的用时落在此区间内），秒数越小表示越快');
                 lines.push('· 集中度（用时）= IQR（四分位距）÷ 中位数，即用时相对该学员自身的离散程度：<10% 集中、<20% 一般、≥20% 分散');
-                lines.push('· 阶段变化 = 最近一个集训的中位用时 ÷ 上一个集训的中位用时 − 1（只有 ≥2 个集训时才计算；变快＝更快）');
+                lines.push('· 用时趋势 = Theil–Sen 稳健斜率（所有「点对斜率」的中位数）：看整个记录期的整体走势，负斜率＝越来越快；|全程变化量| 不到 max(0.5×MAD, 0.3s) 时视为「基本持平」；不用「本期 vs 上期中位数」两点对比，避免样本量差异造成的误判');
             } else {
                 lines.push('（暂无可分析的成绩记录）');
             }
@@ -3923,36 +3925,31 @@
                 const band = off == null ? null : { lo: Math.max(tmin, M - off), hi: M + off };
                 const iqr = S.iqr(times);
                 const disp = (M > 0 && iqr != null) ? iqr / M : null;
-                // 阶段变化：以「集训」为单位 —— 本期集训的中位用时 vs 上期集训（只有 1 个集训时不分析）
-                let stageDelta = null;
-                const gmap = {};
-                const groups = [];
-                usePts.forEach((p) => {
-                    const key = p.trainingId || '__none__';
-                    if (!gmap[key]) {
-                        gmap[key] = { key, name: p.trainingName || '', times: [], lastDate: '' };
-                        groups.push(gmap[key]);
-                    }
-                    gmap[key].times.push(Number(p.time));
-                    if (p.date && p.date !== '-' && p.date > gmap[key].lastDate) gmap[key].lastDate = String(p.date);
-                });
-                if (groups.length >= 2) {
-                    groups.sort((x, y) => String(x.lastDate).localeCompare(String(y.lastDate)));
-                    const cur = groups[groups.length - 1];
-                    const prev = groups[groups.length - 2];
-                    const m1 = S.median(cur.times);
-                    const m2 = S.median(prev.times);
-                    if (m1 != null && m2) {
-                        stageDelta = {
-                            pct: (m1 - m2) / m2,
-                            curName: cur.name || '本期集训', curM: m1, curN: cur.times.length,
-                            prevName: prev.name || '上期集训', prevM: m2, prevN: prev.times.length,
-                        };
-                    }
-                }
-                out.time = { n: times.length, scope, M, off, band, tmin, iqr, disp, stageDelta, sd: S.sd(times), mean: S.mean(times) };
+                // 用时趋势：Theil–Sen 稳健斜率（看全程走势，不再只比「本期 vs 上期集训」两个点）
+                const trend = this._timeTrend(usePts);
+                out.time = { n: times.length, scope, M, off, band, tmin, iqr, disp, trend, sd: S.sd(times), mean: S.mean(times) };
             }
             return out;
+        },
+        // 用时趋势：Theil–Sen 稳健斜率（所有「点对斜率」的中位数；负＝变快）
+        // 不用「本期 vs 上期中位数」：两点比较不构成趋势，且两期样本量差异大时容易与整体走势相反
+        // 返回 { n, slope(秒/场), total(全程秒数), pct(相对典型用时的全程变化), dir: faster|slower|flat|na, tol }
+        _timeTrend(pts) {
+            const S = Shared.stats;
+            const times = (pts || []).map((p) => Number(p.time)).filter((v) => isFinite(v));
+            const n = times.length;
+            const na = { n, slope: null, total: null, pct: null, dir: 'na', tol: null };
+            if (n < 3) return na; // 少于 3 个点谈不上趋势
+            const slope = S.theilSen(times);
+            if (slope == null) return na;
+            const total = slope * (n - 1); // 全程变化量（秒）
+            const mad = S.mad(times);
+            // 持平阈值：全程变化量不到「离散度的一半」且不足 0.3s 时，视为没有实际变化
+            const tol = Math.max(mad != null ? 0.5 * mad : 0, 0.3);
+            const dir = Math.abs(total) < tol ? 'flat' : (total < 0 ? 'faster' : 'slower');
+            const base = S.median(times);
+            const pct = (base && base > 0) ? total / base : null;
+            return { n, slope, total, pct, dir, tol, base };
         },
         // 分析栏 HTML（右侧竖排：标签 + 数值，每行带 title 说明）
         _taskAnalysisHtml(a) {
@@ -3978,12 +3975,20 @@
                     tip: `典型用时（中位数）± 偏差（1.4826×MAD，≈68% 的满分用时落在此范围）；本次实际范围约 ${t.band ? sec(t.band.lo) + ' ~ ' + sec(t.band.hi) : '样本不足'}，个人最快 ${sec(t.tmin)}`,
                 });
                 rows += row('集中度（用时）', t.disp == null ? '—' : `${pct(t.disp)} <span style="font-weight:400;color:var(--gray-400);">${t.disp < 0.10 ? '集中' : (t.disp < 0.20 ? '一般' : '分散')}</span>`, { tip: 'IQR ÷ 中位数 = 相对自身离散度；越小越集中（<10% 集中，<20% 一般）' });
-                if (t.stageDelta) {
-                    const d = t.stageDelta;
-                    const slower = d.pct > 0;
-                    rows += row('阶段变化', `${slower ? '变慢' : '变快'} ${pct(Math.abs(d.pct))}`, {
-                        tip: `以集训为单位：本期「${d.curName}」中位 ${sec(d.curM)}（${d.curN} 次）vs 上期「${d.prevName}」中位 ${sec(d.prevM)}（${d.prevN} 次）；只在有 ≥2 个集训时分析`,
-                        color: Math.abs(d.pct) < 0.05 ? 'var(--gray-800)' : (slower ? '#dc2626' : '#16a34a'),
+                if (t.trend && t.trend.dir !== 'na') {
+                    const g = t.trend;
+                    const label = g.dir === 'flat'
+                        ? '基本持平'
+                        : `${g.dir === 'faster' ? '变快' : '变慢'} ${Math.abs(g.pct * 100).toFixed(0)}%`;
+                    const slopeTxt = g.dir === 'flat'
+                        ? `斜率 ≈ ${Math.abs(g.slope).toFixed(2)}s/场（基本不变）`
+                        : `斜率 ≈ ${Math.abs(g.slope).toFixed(2)}s/场（平均每场${g.dir === 'faster' ? '快' : '慢'} ${Math.abs(g.slope).toFixed(2)}s）`;
+                    const spanTxt = g.dir === 'flat'
+                        ? `全程只变化 ${Math.abs(g.total).toFixed(1)}s`
+                        : `全程约${g.dir === 'faster' ? '快' : '慢'} ${Math.abs(g.total).toFixed(1)}s（相对典型用时约 ${Math.abs((g.pct || 0) * 100).toFixed(0)}%）`;
+                    rows += row('用时趋势', label, {
+                        tip: `Theil–Sen 稳健趋势：看整个记录期的走势，不再只比「本期 vs 上期集训」两个点。${g.n} 次样本，${slopeTxt}，${spanTxt}；|全程变化| 不到 max(0.5×MAD, 0.3s) 视为基本持平（本次阈值 ${g.tol.toFixed(1)}s）；秒数越小表示越快`,
+                        color: g.dir === 'flat' ? 'var(--gray-800)' : (g.dir === 'faster' ? '#16a34a' : '#dc2626'),
                     });
                 }
             }
@@ -4983,8 +4988,12 @@
                             : '';
                         firstSub = false;
                         // 评价条目：多行文本框（首行＝【科目】细则描述，回车换行写补充说明），输入时即时撑高、失焦保存
+                        // 编辑模式下左侧 ⠿ 为拖拽手柄：按住可上下拖动，调整本子维度内的条目顺序
                         const critCell = structEdit
-                            ? `<td><textarea class="quant-crit-text" rows="1" data-dim="${di}" data-sub="${si}" data-ci="${cii}" placeholder="【科目】细则描述（回车换行写补充说明）" title="首行：【科目】+ 细则描述（加粗）；回车换行后每行一条补充说明（灰色小字，多行自动成列表，行首的 - 可作列表标记）；离开输入框即保存" style="width:100%;min-width:150px;display:block;resize:vertical;overflow:hidden;white-space:pre-wrap;line-height:1.4;${inputBase}">${Shared.escapeHtml(c.name || '')}</textarea></td>`
+                            ? `<td><div style="display:flex;gap:0.25rem;align-items:flex-start;">
+                                <button type="button" class="quant-crit-drag" draggable="true" title="按住 ⠿ 上下拖动，调整本子维度内评价条目的顺序">⠿</button>
+                                <textarea class="quant-crit-text" rows="1" data-dim="${di}" data-sub="${si}" data-ci="${cii}" placeholder="【科目】细则描述（回车换行写补充说明）" title="首行：【科目】+ 细则描述（加粗）；回车换行后每行一条补充说明（灰色小字，多行自动成列表，行首的 - 可作列表标记）；离开输入框即保存" style="flex:1;min-width:150px;display:block;resize:vertical;overflow:hidden;white-space:pre-wrap;line-height:1.4;${inputBase}">${Shared.escapeHtml(c.name || '')}</textarea>
+                            </div></td>`
                             : `<td style="color:var(--gray-700);">${c.name ? this.renderCriteriaText(c.name) : '—'}</td>`;
                         const refCell = structEdit
                             ? `<td style="text-align:center;"><input type="number" class="quant-ref" data-dim="${di}" data-sub="${si}" data-ci="${cii}" step="1" min="0" max="${this.MAX_SCORE}" value="${c.ref != null ? this.intRef(c.ref) : ''}" style="width:56px;text-align:center;${inputBase}appearance:textfield;-moz-appearance:textfield;"></td>`
@@ -5010,7 +5019,7 @@
                     <table class="score-table quant-table">
                         <thead><tr>
                             <th colspan="2" style="white-space:nowrap;text-align:center;font-size:0.72rem;padding:0.4rem 0.1rem;">评测维度</th>
-                            <th>评价细则${structEdit ? ' <span style="font-weight:400;color:var(--gray-400);font-size:0.72rem;">（首行＝【科目】细则描述，回车换行写补充说明）</span>' : ''}</th>
+                            <th>评价细则${structEdit ? ' <span style="font-weight:400;color:var(--gray-400);font-size:0.72rem;">（首行＝【科目】细则描述，回车换行写补充说明；⠿ 可拖动排序）</span>' : ''}</th>
                             ${tplEdit ? '' : '<th style="width:76px;text-align:center;">得分</th>'}
                             <th style="width:76px;text-align:center;">参考评分</th>
                             ${structEdit ? '<th class="quant-op-col" style="width:40px;"></th>' : ''}
@@ -5059,6 +5068,52 @@
                 if (!this._critGrowBound) {
                     this._critGrowBound = true;
                     window.addEventListener('resize', () => this.growCritBoxes());
+                }
+                // —— 评价条目拖拽排序（仅限同一子维度内，上下拖动）——
+                // 监听绑在本次渲染出的 table 上（每次重渲染都会新建，不会重复叠加）
+                const qtable = container.querySelector('table.quant-table');
+                if (qtable) {
+                    qtable.addEventListener('dragstart', (e) => {
+                        // 只有 ⠿ 手柄可拖（手柄自身 draggable，不影响文本框内选中文字）
+                        const handle = e.target.closest ? e.target.closest('.quant-crit-drag') : null;
+                        const tr = handle ? handle.closest('tr[data-dim]') : null;
+                        if (!tr) return;
+                        this._dragCrit = { di: Number(tr.dataset.dim), si: Number(tr.dataset.sub), ci: Number(tr.dataset.ci) };
+                        tr.classList.add('qcrit-dragging');
+                        e.dataTransfer.effectAllowed = 'move';
+                        e.dataTransfer.setData('text/plain', tr.dataset.ci);
+                        // 拖动时整个条目行作为预览图（部分浏览器不支持则忽略）
+                        try { e.dataTransfer.setDragImage(tr, 20, 10); } catch (err) { /* ignore */ }
+                    });
+                    qtable.addEventListener('dragover', (e) => {
+                        const d = this._dragCrit;
+                        if (!d || !e.target.closest) return;
+                        const tr = e.target.closest('tr[data-dim]');
+                        if (!tr) return;
+                        // 只在同一子维度内排序；跨子维度不给反馈（浏览器显示禁止光标）
+                        if (Number(tr.dataset.dim) !== d.di || Number(tr.dataset.sub) !== d.si) return;
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'move';
+                        qtable.querySelectorAll('tr.qcrit-over').forEach((r2) => { if (r2 !== tr) r2.classList.remove('qcrit-over'); });
+                        tr.classList.add('qcrit-over');
+                    });
+                    qtable.addEventListener('dragleave', (e) => {
+                        const tr = e.target.closest ? e.target.closest('tr[data-dim]') : null;
+                        if (tr) tr.classList.remove('qcrit-over');
+                    });
+                    qtable.addEventListener('drop', (e) => {
+                        const d = this._dragCrit;
+                        if (!d || !e.target.closest) return;
+                        const tr = e.target.closest('tr[data-dim]');
+                        if (!tr) return;
+                        if (Number(tr.dataset.dim) !== d.di || Number(tr.dataset.sub) !== d.si) return;
+                        e.preventDefault();
+                        this.reorderCriteria(d.di, d.si, d.ci, Number(tr.dataset.ci));
+                    });
+                    qtable.addEventListener('dragend', () => {
+                        this._dragCrit = null;
+                        qtable.querySelectorAll('tr[data-dim]').forEach((r2) => r2.classList.remove('qcrit-dragging', 'qcrit-over'));
+                    });
                 }
                 container.querySelectorAll('.quant-ref').forEach((inp) => {
                     inp.addEventListener('input', () => {
@@ -5117,6 +5172,40 @@
         },
 
         // ============ 量化模板结构编辑：维度 / 子维度 增删 ============
+        // 评价条目拖拽排序（仅限同一子维度内）：同步重映射已填分数，避免分数跟错条目
+        reorderCriteria(di, si, fromCi, toCi) {
+            const t = this._quantTemplate;
+            if (!t || !t[di] || !t[di].subs || !t[di].subs[si]) return;
+            const crits = t[di].subs[si].criteria || [];
+            if (fromCi === toCi || fromCi < 0 || toCi < 0 || fromCi >= crits.length || toCi >= crits.length) return;
+            // 分数键 =「维度序号-维度内条目序号」，移动前先记下本维度内的条目顺序
+            const before = [];
+            (t[di].subs || []).forEach((s) => (s.criteria || []).forEach((c) => before.push(c)));
+            const [moved] = crits.splice(fromCi, 1);
+            crits.splice(toCi, 0, moved);
+            if (!this._tplEditCtx) this.remapQuantScores(di, before); // 模板编辑不涉及学员分数
+            this.persistQuantStructure(t);
+            this.initQuantTable();
+        },
+        // 按条目对象重排本维度已填分数键（before = 移动前本维度内的条目对象列表）
+        remapQuantScores(di, before) {
+            const t = this._quantTemplate;
+            if (!t || !t[di]) return;
+            const after = [];
+            (t[di].subs || []).forEach((s) => (s.criteria || []).forEach((c) => after.push(c)));
+            const saved = this.getQuantScores();
+            const keys = Object.keys(saved);
+            if (!keys.length) return;
+            const movedKey = {}; // 旧序号 → 新序号
+            before.forEach((c, oi) => {
+                const ni = after.indexOf(c);
+                if (ni >= 0 && ni !== oi) movedKey[`${di}-${oi}`] = `${di}-${ni}`;
+            });
+            if (!Object.keys(movedKey).length) return;
+            const next = {};
+            keys.forEach((k) => { next[movedKey[k] !== undefined ? movedKey[k] : k] = saved[k]; });
+            this.saveQuantScores(next);
+        },
         // 追加一个维度（自动命名「维度N」+ 自动配色）
         addDim() {
             const t = (this._quantTemplate || []).slice();

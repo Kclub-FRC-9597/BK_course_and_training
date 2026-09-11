@@ -1331,6 +1331,22 @@ select:focus {
     outline: 2px solid var(--primary-light);
     border-color: var(--primary) !important;
 }
+/* 量化评估表：评价条目拖拽排序（仅结构编辑模式出现 ⠿ 手柄） */
+.quant-crit-drag {
+    border: none;
+    background: none;
+    cursor: grab;
+    color: var(--gray-400);
+    font-size: 0.95rem;
+    line-height: 1;
+    padding: 0.2rem 0.05rem;
+    flex: 0 0 auto;
+    user-select: none;
+}
+.quant-crit-drag:hover { color: var(--primary); }
+.quant-crit-drag:active { cursor: grabbing; }
+.quant-table tbody tr.qcrit-dragging { opacity: 0.45; }
+.quant-table tbody tr.qcrit-over > td { box-shadow: inset 0 2px 0 var(--primary); }
 
 @media (max-width: 640px) {
     .task-bar-row {
