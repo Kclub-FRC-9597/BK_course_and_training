@@ -220,6 +220,14 @@
             }
             .quant-crit-text { text-align: left !important; }
             .quant-ref { text-align: center !important; }
+            /* 评价细则（多行文本框）：保留自动撑高的高度与换行，避免 PDF 里被裁切 */
+            textarea.quant-crit-text {
+                width: 100% !important;
+                min-width: 0 !important;
+                resize: none !important;
+                overflow: visible !important;
+                white-space: pre-wrap !important;
+            }
             /* 删除操作列（仅填写模式存在）：PDF 中整列不呈现 */
             #quantTableContainer .quant-op-col { display: none !important; }
             /* 填写模式的 维度颜色选择器 等编辑控件在 PDF 中隐藏（名称/文字保留为竖排文本） */

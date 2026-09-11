@@ -2188,6 +2188,8 @@
             if (sub) sub.textContent = subtitle || '';
             sheet.classList.add('open');
             document.body.classList.add('report-sheet-lock');
+            // 报告内容是弹窗隐藏时渲染的（那时量不到高度）：显示后重新按内容撑高「评价细则」多行输入框
+            this.growCritBoxes(sheet);
             const bodyEl = sheet.querySelector('.report-sheet-body');
             if (bodyEl) bodyEl.scrollTop = 0;
         },
@@ -4870,16 +4872,47 @@
             this.initQuantTable();
         },
 
-        // 评价细则中的【关键词】特殊高亮显示（如【科目】），用于报告的细则文本渲染
+        // 评价条目分三段渲染：①【科目】（沿用现有高亮样式）②细则描述（加粗）③补充说明（灰色小字，多行自动成列表）
+        // 输入规则：首行写【科目】细则描述，其后每行一条补充说明（行首的 - / * / • 会被当作列表标记去掉）
         renderCriteriaText(text) {
             const esc = (s) => Shared.escapeHtml(s);
-            return String(text || '').split(/(【[^】]*】)/g).map((part) => {
+            const inline = (line) => String(line || '').split(/(【[^】]*】)/g).map((part) => {
                 if (/^【[^】]*】$/.test(part)) {
                     const inner = part.slice(1, -1);
                     return `<span style="display:inline-block;background:#dbeafe;color:#1d4ed8;font-weight:700;padding:0 0.15rem;border-radius:3px;line-height:1.3;">${esc(inner)}</span>`;
                 }
                 return esc(part);
             }).join('');
+            const raw = String(text || '').replace(/\r\n?/g, '\n').split('\n').map((l) => l.trim());
+            while (raw.length && !raw[0]) raw.shift(); // 忽略开头空行
+            while (raw.length && !raw[raw.length - 1]) raw.pop(); // 忽略结尾空行
+            if (!raw.length) return '';
+            const head = raw.shift(); // 首行 =【科目】+ 细则描述（加粗）
+            const noteLines = raw.filter((l) => l);
+            const markers = noteLines.map((l) => /^[-*•·]\s+/.test(l));
+            const notes = noteLines.map((l, i) => (markers[i] ? l.replace(/^[-*•·]\s+/, '') : l));
+            let html = `<span style="font-weight:700;">${inline(head)}</span>`;
+            if (notes.length) {
+                const noteStyle = 'font-weight:400;color:var(--gray-500);font-size:0.72rem;line-height:1.3;';
+                // 多条补充说明（或写了 - 标记）→ 列表；只有一条且未写标记 → 单行灰字
+                const asList = notes.length > 1 || markers.some(Boolean);
+                html += asList
+                    ? `<ul style="margin:0.1rem 0 0;padding-left:1rem;${noteStyle}">` + notes.map((n) => `<li>${inline(n)}</li>`).join('') + '</ul>'
+                    : `<div style="margin-top:0.1rem;${noteStyle}">${inline(notes[0])}</div>`;
+            }
+            return html;
+        },
+        // 评价细则输入框（textarea）自适应高度：内容几行就撑几行，换行排版所见即所得
+        growCritBox(el) {
+            if (!el || el.tagName !== 'TEXTAREA') return;
+            el.style.height = 'auto';
+            const h = el.scrollHeight + (el.offsetHeight - el.clientHeight); // 内容 + 上下边框（border-box）
+            el.style.height = (h > 0 ? h : 28) + 'px'; // 容器隐藏时量不到高度，给单行兜底
+        },
+        // 批量撑高（root 省略时取全文档）：弹窗由隐藏转为显示后调用，此时才量得到真实高度
+        growCritBoxes(root) {
+            const scope = root && root.querySelectorAll ? root : document;
+            scope.querySelectorAll('textarea.quant-crit-text').forEach((el) => this.growCritBox(el));
         },
 
         initQuantTable() {
@@ -4949,8 +4982,9 @@
                                 : `<td class="qsub" rowspan="${subRowspan}" style="width:${subW}px;min-width:${subW}px;max-width:${subW}px;text-align:center;vertical-align:middle;background:${rowBg};"><span style="${vtext}">${Shared.escapeHtml(s.sub)}</span></td>`)
                             : '';
                         firstSub = false;
+                        // 评价条目：多行文本框（首行＝【科目】细则描述，回车换行写补充说明），输入时即时撑高、失焦保存
                         const critCell = structEdit
-                            ? `<td><input type="text" class="quant-crit-text" data-dim="${di}" data-sub="${si}" data-ci="${cii}" value="${Shared.escapeHtml(c.name || '')}" placeholder="评价细则" style="width:100%;min-width:150px;${inputBase}"></td>`
+                            ? `<td><textarea class="quant-crit-text" rows="1" data-dim="${di}" data-sub="${si}" data-ci="${cii}" placeholder="【科目】细则描述（回车换行写补充说明）" title="首行：【科目】+ 细则描述（加粗）；回车换行后每行一条补充说明（灰色小字，多行自动成列表，行首的 - 可作列表标记）；离开输入框即保存" style="width:100%;min-width:150px;display:block;resize:vertical;overflow:hidden;white-space:pre-wrap;line-height:1.4;${inputBase}">${Shared.escapeHtml(c.name || '')}</textarea></td>`
                             : `<td style="color:var(--gray-700);">${c.name ? this.renderCriteriaText(c.name) : '—'}</td>`;
                         const refCell = structEdit
                             ? `<td style="text-align:center;"><input type="number" class="quant-ref" data-dim="${di}" data-sub="${si}" data-ci="${cii}" step="1" min="0" max="${this.MAX_SCORE}" value="${c.ref != null ? this.intRef(c.ref) : ''}" style="width:56px;text-align:center;${inputBase}appearance:textfield;-moz-appearance:textfield;"></td>`
@@ -4976,7 +5010,7 @@
                     <table class="score-table quant-table">
                         <thead><tr>
                             <th colspan="2" style="white-space:nowrap;text-align:center;font-size:0.72rem;padding:0.4rem 0.1rem;">评测维度</th>
-                            <th>评价细则</th>
+                            <th>评价细则${structEdit ? ' <span style="font-weight:400;color:var(--gray-400);font-size:0.72rem;">（首行＝【科目】细则描述，回车换行写补充说明）</span>' : ''}</th>
                             ${tplEdit ? '' : '<th style="width:76px;text-align:center;">得分</th>'}
                             <th style="width:76px;text-align:center;">参考评分</th>
                             ${structEdit ? '<th class="quant-op-col" style="width:40px;"></th>' : ''}
@@ -5010,6 +5044,9 @@
                     });
                 });
                 container.querySelectorAll('.quant-crit-text').forEach((inp) => {
+                    // 多行输入：渲染后先按内容撑高，输入过程中持续撑高（回车换行所见即所得）
+                    this.growCritBox(inp);
+                    inp.addEventListener('input', () => this.growCritBox(inp));
                     inp.addEventListener('change', () => {
                         const t = this._quantTemplate;
                         if (t && t[Number(inp.dataset.dim)] && t[Number(inp.dataset.dim)].subs[Number(inp.dataset.sub)]) {
@@ -5018,6 +5055,11 @@
                         }
                     });
                 });
+                // 窗口尺寸变化 → 列宽变化 → 换行位置变化，重新撑高（只绑一次）
+                if (!this._critGrowBound) {
+                    this._critGrowBound = true;
+                    window.addEventListener('resize', () => this.growCritBoxes());
+                }
                 container.querySelectorAll('.quant-ref').forEach((inp) => {
                     inp.addEventListener('input', () => {
                         const t = this._quantTemplate;
